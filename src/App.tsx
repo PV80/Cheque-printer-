@@ -10,7 +10,8 @@ function Main() {
   return (
     <div className="min-h-screen bg-gray-50">
       <Header />
-      <main>
+      {/* pb-16 on mobile so content clears the bottom nav bar */}
+      <main className="pb-20 md:pb-0">
         {state.activeTab === 'upload' && <UploadZone />}
         {state.activeTab === 'batches' && <BatchView />}
         {state.activeTab === 'print' && <PrintQueue />}

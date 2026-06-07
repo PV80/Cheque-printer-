@@ -56,13 +56,13 @@ export function UploadZone() {
   const uploading = files.some((f) => f.state === 'processing');
 
   return (
-    <div className="max-w-2xl mx-auto py-10 px-4">
+    <div className="max-w-2xl mx-auto py-6 md:py-10 px-3 md:px-4">
       <div
         onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
         onDragLeave={() => setDragging(false)}
         onDrop={onDrop}
         onClick={() => inputRef.current?.click()}
-        className={`border-2 border-dashed rounded-xl p-16 text-center cursor-pointer transition-all ${
+        className={`border-2 border-dashed rounded-xl p-8 md:p-16 text-center cursor-pointer transition-all ${
           dragging
             ? 'border-ncba-teal bg-ncba-light scale-[1.01]'
             : 'border-gray-300 bg-gray-50 hover:border-ncba-teal hover:bg-ncba-light'

@@ -123,35 +123,37 @@ export function PrintQueue() {
   }
 
   return (
-    <div className="max-w-4xl mx-auto py-6 px-4">
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-xl font-bold text-gray-800">
+    <div className="max-w-4xl mx-auto py-4 md:py-6 px-3 md:px-4">
+      <div className="flex items-center justify-between mb-4 md:mb-6">
+        <h1 className="text-lg md:text-xl font-bold text-gray-800">
           Print Queue
-          <span className="ml-2 text-base font-normal text-gray-500">
+          <span className="ml-2 text-sm md:text-base font-normal text-gray-500">
             {sorted.length} cheque{sorted.length !== 1 ? 's' : ''}
           </span>
         </h1>
         <button
           onClick={printAll}
           disabled={noProfile.length === sorted.length}
-          className="flex items-center gap-2 px-5 py-2.5 bg-ncba-teal text-white rounded-lg hover:bg-ncba-dark disabled:opacity-50 transition-colors font-medium"
+          className="flex items-center gap-1.5 md:gap-2 px-3 md:px-5 py-2 md:py-2.5 bg-ncba-teal text-white rounded-lg hover:bg-ncba-dark disabled:opacity-50 transition-colors font-medium text-sm md:text-base"
         >
           <Printer size={16} />
-          Print All ({sorted.filter((c) => !!c.companyId).length})
+          <span className="hidden sm:inline">Print All</span>
+          <span className="sm:hidden">Print</span>
+          {' '}({sorted.filter((c) => !!c.companyId).length})
         </button>
       </div>
 
       {noProfile.length > 0 && (
-        <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-center gap-3 text-sm text-amber-800">
-          <AlertTriangle size={16} />
-          {noProfile.length} cheque{noProfile.length !== 1 ? 's' : ''} have no company profile — set up in Companies tab before printing.
+        <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2 text-sm text-amber-800">
+          <AlertTriangle size={16} className="shrink-0 mt-0.5" />
+          <span>{noProfile.length} cheque{noProfile.length !== 1 ? 's' : ''} have no company profile — set up in Companies tab first.</span>
         </div>
       )}
 
       {needsReview.length > 0 && (
-        <div className="mb-4 p-3 bg-orange-50 border border-orange-200 rounded-lg flex items-center gap-3 text-sm text-orange-800">
-          <AlertTriangle size={16} />
-          {needsReview.length} cheque{needsReview.length !== 1 ? 's' : ''} flagged for review — verify extracted data before printing.
+        <div className="mb-4 p-3 bg-orange-50 border border-orange-200 rounded-lg flex items-start gap-2 text-sm text-orange-800">
+          <AlertTriangle size={16} className="shrink-0 mt-0.5" />
+          <span>{needsReview.length} cheque{needsReview.length !== 1 ? 's' : ''} flagged for review — verify before printing.</span>
         </div>
       )}
 
@@ -163,74 +165,78 @@ export function PrintQueue() {
           return (
             <div
               key={cheque.id}
-              className={`bg-white rounded-xl border px-5 py-4 flex items-center gap-4 ${
+              className={`bg-white rounded-xl border px-3 md:px-5 py-3 md:py-4 ${
                 hasProfile ? 'border-gray-200' : 'border-amber-200 bg-amber-50/30'
               }`}
             >
-              <span className="w-6 h-6 rounded-full bg-gray-100 flex items-center justify-center text-xs font-bold text-gray-500">
-                {i + 1}
-              </span>
-
-              <div className="flex-1 grid grid-cols-4 gap-4">
-                <div>
-                  <p className="text-xs text-gray-400">CHQ #</p>
-                  <p className="font-mono font-semibold text-gray-800">{cheque.chequeNumber}</p>
-                </div>
-                <div>
-                  <p className="text-xs text-gray-400">Payee</p>
-                  <p className="text-sm text-gray-800 truncate">{cheque.payee}</p>
-                </div>
-                <div>
-                  <p className="text-xs text-gray-400">Amount</p>
-                  <p className="text-sm text-gray-800">
-                    KES {cheque.amountFigures.toLocaleString()}
+              {/* Mobile layout */}
+              <div className="flex items-start gap-3 md:hidden">
+                <span className="w-6 h-6 rounded-full bg-gray-100 flex items-center justify-center text-xs font-bold text-gray-500 shrink-0 mt-0.5">
+                  {i + 1}
+                </span>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-0.5">
+                    <span className="font-mono text-xs font-bold text-gray-500">CHQ #{cheque.chequeNumber}</span>
+                    {cheque.status === 'needs_review' && <AlertTriangle size={13} className="text-amber-500" />}
+                    {cheque.status === 'printed' && <CheckCircle size={13} className="text-green-500" />}
+                  </div>
+                  <p className="font-semibold text-gray-800 truncate text-sm">{cheque.payee}</p>
+                  <div className="flex items-center gap-3 mt-0.5">
+                    <span className="text-xs text-gray-500">{cheque.date}</span>
+                    <span className="text-xs font-mono font-medium text-gray-700">
+                      KES {cheque.amountFigures.toLocaleString()}
+                    </span>
+                  </div>
+                  <p className="text-xs mt-0.5">
+                    {company ? <span className="text-gray-500">{company.name}</span> : <span className="text-amber-600">No company profile</span>}
                   </p>
                 </div>
-                <div>
-                  <p className="text-xs text-gray-400">Company</p>
-                  <p className="text-sm truncate">
-                    {company ? (
-                      <span className="text-gray-800">{company.name}</span>
-                    ) : (
-                      <span className="text-amber-600">No profile</span>
-                    )}
-                  </p>
+                <div className="flex flex-col gap-1 shrink-0">
+                  <button onClick={() => setPreviewing(cheque)} className="p-1.5 text-gray-400 hover:text-ncba-teal"><Eye size={15} /></button>
+                  {hasProfile && (
+                    <button onClick={() => printSingle(cheque)} className="p-1.5 text-ncba-teal"><Printer size={15} /></button>
+                  )}
+                  <button onClick={() => dispatch({ type: 'TOGGLE_PRINT_QUEUE', id: cheque.id })} className="p-1.5 text-gray-400 hover:text-red-500"><X size={15} /></button>
                 </div>
               </div>
 
-              <div className="flex items-center gap-2">
-                {cheque.status === 'needs_review' && (
-                  <span title="Needs review"><AlertTriangle size={16} className="text-amber-500" /></span>
-                )}
-                {cheque.status === 'printed' && (
-                  <span title="Already printed"><CheckCircle size={16} className="text-green-500" /></span>
-                )}
-
-                <button
-                  onClick={() => setPreviewing(cheque)}
-                  className="p-2 text-gray-400 hover:text-ncba-teal transition-colors"
-                  title="Preview"
-                >
-                  <Eye size={16} />
-                </button>
-
-                {hasProfile && (
-                  <button
-                    onClick={() => printSingle(cheque)}
-                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-ncba-teal text-ncba-teal rounded-lg hover:bg-ncba-light transition-colors"
-                  >
-                    <Printer size={12} />
-                    Print
-                  </button>
-                )}
-
-                <button
-                  onClick={() => dispatch({ type: 'TOGGLE_PRINT_QUEUE', id: cheque.id })}
-                  className="p-2 text-gray-400 hover:text-red-500 transition-colors"
-                  title="Remove from queue"
-                >
-                  <X size={16} />
-                </button>
+              {/* Desktop layout */}
+              <div className="hidden md:flex items-center gap-4">
+                <span className="w-6 h-6 rounded-full bg-gray-100 flex items-center justify-center text-xs font-bold text-gray-500 shrink-0">
+                  {i + 1}
+                </span>
+                <div className="flex-1 grid grid-cols-4 gap-4">
+                  <div>
+                    <p className="text-xs text-gray-400">CHQ #</p>
+                    <p className="font-mono font-semibold text-gray-800">{cheque.chequeNumber}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-gray-400">Payee</p>
+                    <p className="text-sm text-gray-800 truncate">{cheque.payee}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-gray-400">Amount</p>
+                    <p className="text-sm text-gray-800">KES {cheque.amountFigures.toLocaleString()}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-gray-400">Company</p>
+                    <p className="text-sm truncate">
+                      {company ? <span className="text-gray-800">{company.name}</span> : <span className="text-amber-600">No profile</span>}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {cheque.status === 'needs_review' && <AlertTriangle size={16} className="text-amber-500" />}
+                  {cheque.status === 'printed' && <CheckCircle size={16} className="text-green-500" />}
+                  <button onClick={() => setPreviewing(cheque)} className="p-2 text-gray-400 hover:text-ncba-teal transition-colors"><Eye size={16} /></button>
+                  {hasProfile && (
+                    <button onClick={() => printSingle(cheque)} className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-ncba-teal text-ncba-teal rounded-lg hover:bg-ncba-light transition-colors">
+                      <Printer size={12} />
+                      Print
+                    </button>
+                  )}
+                  <button onClick={() => dispatch({ type: 'TOGGLE_PRINT_QUEUE', id: cheque.id })} className="p-2 text-gray-400 hover:text-red-500 transition-colors"><X size={16} /></button>
+                </div>
               </div>
             </div>
           );

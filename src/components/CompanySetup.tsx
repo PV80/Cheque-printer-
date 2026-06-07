@@ -48,7 +48,10 @@ export function CompanySetup() {
   if (calibrating) {
     const latest = state.companies.find((c) => c.id === calibrating.id) || calibrating;
     return (
-      <div className="max-w-5xl mx-auto py-6 px-4">
+      <div className="max-w-5xl mx-auto py-4 md:py-6 px-3 md:px-4">
+        <div className="md:hidden mb-4 px-3 py-2 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-700">
+          Calibration is best done on a desktop. You can still save settings here.
+        </div>
         <div className="flex items-center gap-3 mb-6">
           <button
             onClick={() => setCalibrating(null)}
@@ -65,7 +68,7 @@ export function CompanySetup() {
   }
 
   return (
-    <div className="max-w-3xl mx-auto py-6 px-4">
+    <div className="max-w-3xl mx-auto py-4 md:py-6 px-3 md:px-4">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-xl font-bold text-gray-800">Company Profiles</h1>
         <button
@@ -210,12 +213,14 @@ export function CompanySetup() {
         </div>
       )}
 
-      <div className="mt-8 p-4 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-800">
+      <div className="mt-6 p-4 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-800">
         <p className="font-semibold mb-1">Calibration tip</p>
-        <p>
+        <p className="mb-2">
           Click "Calibrate fields" to position the date, payee, amount and words fields on your NCBA cheque.
-          Use "Print test" to print sample data on a blank cheque, measure the offset, and adjust until alignment is perfect.
-          You can also upload a scan of a blank cheque leaf as a background guide.
+          Use "Print test" to print sample data on a blank cheque, measure the offset, and adjust until perfect.
+        </p>
+        <p className="md:hidden text-amber-700 font-medium">
+          Tip: The calibration tool works best on a desktop or laptop where you can drag fields precisely.
         </p>
       </div>
     </div>
