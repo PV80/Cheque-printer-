@@ -20,10 +20,12 @@ export interface FieldPosition {
   x: number;       // mm from left of cheque
   y: number;       // mm from top of cheque
   width: number;   // mm
+  height?: number; // mm — if set, enables word wrap within this height
   fontSize: number;
   fontFamily: 'Arial' | 'Courier New' | 'Times New Roman';
   fontWeight: 'normal' | 'bold';
   align: 'left' | 'center' | 'right';
+  wrap?: boolean;  // allow text to wrap within width/height
 }
 
 export interface ChequeTemplate {
@@ -38,11 +40,16 @@ export interface ChequeTemplate {
   };
 }
 
+export type PrinterType = 'laser' | 'dot_matrix';
+
 export interface CompanyProfile {
   id: string;
   name: string;              // canonical display name
   aliases: string[];         // name variants that appear in PDFs
   bankAccount?: string;
+  printerType: PrinterType;
+  printerOffsetX: number;    // mm — horizontal shift for printer calibration
+  printerOffsetY: number;    // mm — vertical shift for printer calibration
   template: ChequeTemplate;
 }
 

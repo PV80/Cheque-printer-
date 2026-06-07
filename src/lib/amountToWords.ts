@@ -21,7 +21,7 @@ function convertHundreds(n: number): string {
 
 export function amountToWords(amount: number): string {
   const whole = Math.round(amount);
-  if (whole === 0) return 'Zero Kenya Shillings Only';
+  if (whole === 0) return 'Zero Only';
 
   const parts: string[] = [];
 
@@ -35,7 +35,7 @@ export function amountToWords(amount: number): string {
   if (thousands) parts.push(convertHundreds(thousands) + ' Thousand');
   if (remainder) parts.push(convertHundreds(remainder));
 
-  return parts.join(' ') + ' Kenya Shillings Only';
+  return parts.join(' ') + ' Only';
 }
 
 export function parseAmountString(raw: string): number {

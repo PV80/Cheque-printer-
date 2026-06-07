@@ -24,7 +24,13 @@ export function PrintQueue() {
       alert('No company profile for this cheque. Set up the company first.');
       return;
     }
-    openPrintWindow([cheque], company.template);
+    openPrintWindow(
+      [cheque],
+      company.template,
+      company.printerType || 'laser',
+      company.printerOffsetX ?? 0,
+      company.printerOffsetY ?? 0
+    );
     setTimeout(() => dispatch({ type: 'MARK_PRINTED', ids: [cheque.id] }), 1500);
   }
 
@@ -39,21 +45,38 @@ export function PrintQueue() {
     for (const [companyId, cheques] of byCompany) {
       const company = state.companies.find((c) => c.id === companyId);
       if (!company) continue;
-      openPrintWindow(cheques, company.template);
+      openPrintWindow(
+        cheques,
+        company.template,
+        company.printerType || 'laser',
+        company.printerOffsetX ?? 0,
+        company.printerOffsetY ?? 0
+      );
     }
     setTimeout(
-      () => dispatch({ type: 'MARK_PRINTED', ids: sorted.filter((c) => !!c.companyId).map((c) => c.id) }),
+      () =>
+        dispatch({
+          type: 'MARK_PRINTED',
+          ids: sorted.filter((c) => !!c.companyId).map((c) => c.id),
+        }),
       1500
     );
   }
 
-  function openPrintWindow(cheques: ChequeData[], template: ChequeTemplate) {
+  function openPrintWindow(
+    cheques: ChequeData[],
+    template: ChequeTemplate,
+    printerType: string,
+    offsetX: number,
+    offsetY: number
+  ) {
     const win = window.open('', '_blank');
     if (!win) return;
 
     const t = template;
+    const pageH = t.chequeHeight + t.pageTopOffset;
     const pages = cheques
-      .map((cheque) => buildChequePage(cheque, t))
+      .map((cheque) => buildChequePage(cheque, t, printerType, offsetX, offsetY))
       .join('\n');
 
     win.document.write(`<!DOCTYPE html>
@@ -62,21 +85,19 @@ export function PrintQueue() {
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   @page {
-    size: ${t.chequeWidth}mm ${t.chequeHeight + t.pageTopOffset}mm;
+    size: ${t.chequeWidth}mm ${pageH}mm;
     margin: 0;
   }
   .cheque-page {
     position: relative;
     width: ${t.chequeWidth}mm;
-    height: ${t.chequeHeight + t.pageTopOffset}mm;
+    height: ${pageH}mm;
     page-break-after: always;
   }
   .cheque-page:last-child { page-break-after: avoid; }
-  .field {
-    position: absolute;
-    white-space: nowrap;
-    overflow: hidden;
-  }
+  .field { position: absolute; }
+  .field-nowrap { white-space: nowrap; overflow: hidden; }
+  .field-wrap { white-space: normal; overflow: visible; word-wrap: break-word; }
 </style>
 </head><body>${pages}</body></html>`);
     win.document.close();
@@ -223,30 +244,40 @@ export function PrintQueue() {
   );
 }
 
-function buildChequePage(cheque: ChequeData, t: ChequeTemplate): string {
-  const offset = t.pageTopOffset;
+function buildChequePage(
+  cheque: ChequeData,
+  t: ChequeTemplate,
+  printerType: string,
+  offsetX: number,
+  offsetY: number
+): string {
+  const topOffset = t.pageTopOffset;
+  const fontStack =
+    printerType === 'dot_matrix' ? "'Courier New',monospace" : "'Arial',sans-serif";
 
   const fieldHtml = (fieldKey: keyof ChequeTemplate['fields'], value: string) => {
-    const pos = t.fields[fieldKey];
-    if (!pos) return '';
-    return `<div class="field" style="
-      left:${pos.x}mm;
-      top:${pos.y + offset}mm;
-      width:${pos.width}mm;
-      font-family:'${pos.fontFamily}',sans-serif;
-      font-size:${pos.fontSize}pt;
-      font-weight:${pos.fontWeight};
-      text-align:${pos.align};
+    const p = t.fields[fieldKey];
+    if (!p) return '';
+    const wrapCls = p.wrap ? 'field-wrap' : 'field-nowrap';
+    const heightStyle = p.wrap && p.height ? `height:${p.height}mm;` : '';
+    return `<div class="field ${wrapCls}" style="
+      left:${p.x + offsetX}mm;
+      top:${p.y + topOffset + offsetY}mm;
+      width:${p.width}mm;
+      ${heightStyle}
+      font-family:${fontStack};
+      font-size:${p.fontSize}pt;
+      font-weight:${p.fontWeight};
+      text-align:${p.align};
     ">${escapeHtml(value)}</div>`;
   };
 
   return `<div class="cheque-page">
     ${fieldHtml('date', cheque.date)}
     ${fieldHtml('payee', cheque.payee)}
-    ${fieldHtml('amountWords', cheque.amountWords)}
     ${fieldHtml('amountFigures', formatAmount(cheque.amountFigures))}
+    ${fieldHtml('amountWords', cheque.amountWords)}
   </div>`;
-
 }
 
 function escapeHtml(str: string): string {
@@ -256,6 +287,7 @@ function escapeHtml(str: string): string {
     .replace(/>/g, '&gt;');
 }
 
+// Kenyan cheque standard: comma-separated with /= suffix, no decimal places
 function formatAmount(n: number): string {
-  return n.toLocaleString('en-KE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return n.toLocaleString('en-KE', { minimumFractionDigits: 0, maximumFractionDigits: 0 }) + '/=';
 }
