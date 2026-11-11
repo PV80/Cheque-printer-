@@ -84,12 +84,13 @@ export function parseAmountToCents(raw: string): number | null {
   let wholeText: string;
   let cents = 0;
 
-  const stroke = s.match(/^([\d,]+)\/(=|-|\d{2})?$/);
-  const plain = s.match(/^([\d,]+)(?:\.(\d{1,2}))?=?$/);
+  // "15,000/50" is shillings/cents. A trailing "/=", "/-" or "=" just closes the amount.
+  const stroke = s.match(/^([\d,]+)\/(\d{2})$/);
+  const plain = s.replace(/(?:\/[=-]?|=)$/, '').match(/^([\d,]+)(?:\.(\d{1,2}))?$/);
 
   if (stroke) {
     wholeText = stroke[1];
-    if (stroke[2] && /^\d{2}$/.test(stroke[2])) cents = parseInt(stroke[2], 10);
+    cents = parseInt(stroke[2], 10);
   } else if (plain) {
     wholeText = plain[1];
     if (plain[2]) cents = parseInt(plain[2].padEnd(2, '0'), 10);
