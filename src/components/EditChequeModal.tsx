@@ -1,125 +1,99 @@
 import { useState } from 'react';
-import { X, Save } from 'lucide-react';
-import { ChequeData } from '../types';
-import { useApp } from '../context/AppContext';
-import { amountToWords, parseAmountString } from '../lib/amountToWords';
+import { FileText, Save } from 'lucide-react';
+import { amountToWords, formatFigures, formatMoney, parseAmountToCents } from '../core/amount';
+import { formatDate, parseDate } from '../core/dates';
+import { editCheque } from '../core/store';
+import type { Cheque } from '../core/types';
+import { api } from '../platform/api';
+import { useApp } from '../state/AppContext';
+import { Button, Field, Modal, Notice } from './ui';
 
 interface Props {
-  cheque: ChequeData;
+  cheque: Cheque;
   onClose: () => void;
 }
 
 export function EditChequeModal({ cheque, onClose }: Props) {
-  const { dispatch } = useApp();
-  const [form, setForm] = useState({
-    payee: cheque.payee,
-    date: cheque.date,
-    amountFigures: cheque.amountFigures.toString(),
-    amountWords: cheque.amountWords,
-    chequeNumber: cheque.chequeNumber,
-  });
+  const { run, issuesOf } = useApp();
+  const [chequeNumber, setChequeNumber] = useState(cheque.chequeNumber);
+  const [date, setDate] = useState(formatDate(cheque.date) || cheque.requisitions[0]?.dateRaw || '');
+  const [payee, setPayee] = useState(cheque.payee);
+  const [amount, setAmount] = useState(cheque.amountCents > 0 ? formatMoney(cheque.amountCents) : '');
+  const [error, setError] = useState('');
 
-  function handleAmountChange(val: string) {
-    const num = parseAmountString(val);
-    setForm((f) => ({
-      ...f,
-      amountFigures: val,
-      amountWords: num > 0 ? amountToWords(num) : f.amountWords,
-    }));
-  }
+  const cents = parseAmountToCents(amount);
+  const iso = parseDate(date);
+  const mismatch = issuesOf(cheque).find((i) => i.kind === 'amount_mismatch');
 
   function save() {
-    const updated: ChequeData = {
-      ...cheque,
-      payee: form.payee.trim(),
-      date: form.date.trim(),
-      amountFigures: parseAmountString(form.amountFigures),
-      amountWords: form.amountWords.trim(),
-      chequeNumber: form.chequeNumber.trim(),
-      status: 'ready',
-    };
-    dispatch({ type: 'UPDATE_CHEQUE', cheque: updated });
-    onClose();
+    if (!payee.trim()) return setError('Enter the payee.');
+    if (!iso) return setError('Enter the date as DD/MM/YYYY.');
+    if (cents === null || cents <= 0) return setError('Enter the amount, e.g. 15,000 or 15,000.50.');
+    if (!/^\d{1,12}$/.test(chequeNumber.trim())) return setError('The cheque number must be digits only.');
+    const ok = run((s, ctx) => editCheque(s, ctx, cheque.id, { payee, date: iso, amountCents: cents, chequeNumber }));
+    if (ok) onClose();
   }
 
   return (
-    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-lg">
-        <div className="flex items-center justify-between px-6 py-4 border-b">
-          <h2 className="font-semibold text-gray-800">Edit Cheque Details</h2>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
-            <X size={20} />
-          </button>
+    <Modal
+      title="Check and correct cheque details"
+      onClose={onClose}
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button variant="primary" onClick={save} data-testid="save-edit">
+            <Save size={14} /> Save — these details are correct
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-4">
+        {mismatch && <Notice tone="amber">{mismatch.message} Enter the amount that should be paid.</Notice>}
+
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Cheque number" value={chequeNumber} onChange={(e) => setChequeNumber(e.target.value)} inputMode="numeric" />
+          <Field label="Date (DD/MM/YYYY)" value={date} onChange={(e) => setDate(e.target.value)} placeholder="05/06/2026" />
+        </div>
+        <Field label="Payee" value={payee} onChange={(e) => setPayee(e.target.value)} />
+        <Field label="Amount (KES)" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="15,000.00" inputMode="decimal" />
+
+        <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 text-sm">
+          <p className="text-xs text-gray-500 mb-1">Will be printed as</p>
+          {cents !== null && cents > 0 ? (
+            <>
+              <p className="font-mono font-semibold text-gray-800">{formatFigures(cents)}</p>
+              <p className="text-gray-800">{amountToWords(cents)}</p>
+            </>
+          ) : (
+            <p className="text-gray-400">Enter an amount</p>
+          )}
         </div>
 
-        <div className="px-6 py-5 space-y-4">
-          <div>
-            <label className="block text-xs font-medium text-gray-500 mb-1">CHQ #</label>
-            <input
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ncba-teal"
-              value={form.chequeNumber}
-              onChange={(e) => setForm((f) => ({ ...f, chequeNumber: e.target.value }))}
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-gray-500 mb-1">Date (DD/MM/YYYY)</label>
-            <input
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ncba-teal"
-              value={form.date}
-              onChange={(e) => setForm((f) => ({ ...f, date: e.target.value }))}
-              placeholder="05/06/2026"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-gray-500 mb-1">Payee</label>
-            <input
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ncba-teal"
-              value={form.payee}
-              onChange={(e) => setForm((f) => ({ ...f, payee: e.target.value }))}
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-gray-500 mb-1">
-              Amount (figures) — type number to auto-generate words
-            </label>
-            <input
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ncba-teal"
-              value={form.amountFigures}
-              onChange={(e) => handleAmountChange(e.target.value)}
-              placeholder="15000"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-gray-500 mb-1">Amount in words</label>
-            <textarea
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ncba-teal resize-none"
-              rows={2}
-              value={form.amountWords}
-              onChange={(e) => setForm((f) => ({ ...f, amountWords: e.target.value }))}
-            />
-          </div>
+        <div>
+          <p className="text-xs font-medium text-gray-600 mb-1">What the requisition says</p>
+          <ul className="space-y-2">
+            {cheque.requisitions.map((r) => (
+              <li key={r.id} className="border border-gray-200 rounded-lg p-3 text-xs text-gray-700">
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <span className="flex items-center gap-1.5 font-medium truncate">
+                    <FileText size={13} className="text-gray-400 shrink-0" /> {r.filename}
+                  </span>
+                  <Button small onClick={() => void api.openPdf(r.fileHash)}>
+                    Open PDF
+                  </Button>
+                </div>
+                <p>Payee: {r.payee || '—'}</p>
+                <p>Date: {r.dateRaw || '—'} · Cheque: {r.chequeNumber || '—'}</p>
+                <p>
+                  Figures: {r.amountCents > 0 ? formatMoney(r.amountCents) : '—'} · Words: {r.amountWordsRaw || '—'}
+                </p>
+              </li>
+            ))}
+          </ul>
         </div>
 
-        <div className="flex justify-end gap-3 px-6 py-4 border-t bg-gray-50 rounded-b-xl">
-          <button
-            onClick={onClose}
-            className="px-4 py-2 text-sm text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-100 transition-colors"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={save}
-            className="flex items-center gap-2 px-4 py-2 text-sm bg-ncba-teal text-white rounded-lg hover:bg-ncba-dark transition-colors"
-          >
-            <Save size={14} />
-            Save Changes
-          </button>
-        </div>
+        {error && <Notice tone="red">{error}</Notice>}
       </div>
-    </div>
+    </Modal>
   );
 }

@@ -1,4 +1,8 @@
 node_modules/
 dist/
+dist-electron/
+release/
+public/pdfjs/
+e2e/.tmp/
 .env
 *.local

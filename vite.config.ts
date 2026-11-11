@@ -1,14 +1,15 @@
-import { defineConfig } from 'vite';
+import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   plugins: [react()],
-  base: process.env.GITHUB_ACTIONS ? '/Cheque-printer-/' : '/',
-  // Allow Vite to process the pdfjs worker file as a bundled asset
+  // Relative paths so the bundle loads from the app:// protocol inside the desktop app.
+  base: './',
   optimizeDeps: {
     include: ['pdfjs-dist'],
   },
   build: {
+    target: 'es2022',
     rollupOptions: {
       output: {
         manualChunks: {
@@ -16,5 +17,9 @@ export default defineConfig({
         },
       },
     },
+  },
+  test: {
+    environment: 'node',
+    include: ['tests/**/*.test.ts'],
   },
 });

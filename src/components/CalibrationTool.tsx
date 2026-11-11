@@ -1,669 +1,399 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
-import { Move, Save, RefreshCw, Printer, Upload, Info } from 'lucide-react';
-import { CompanyProfile, FieldPosition, ChequeTemplate, PrinterType } from '../types';
-import { useApp } from '../context/AppContext';
-import { DEFAULT_TEMPLATE } from '../lib/storage';
-
-type FieldKey = keyof ChequeTemplate['fields'];
+import { useEffect, useRef, useState, type ChangeEvent, type MouseEvent as ReactMouseEvent } from 'react';
+import { Copy, Info, Printer, RefreshCw, Save, Upload } from 'lucide-react';
+import { buildPrintHtml, DEFAULT_TEMPLATE, FIELD_KEYS, FONT_STACKS, layoutCheque, pageSizeMm, type ChequeValues } from '../core/layout';
+import { saveCompany } from '../core/store';
+import type { ChequeTemplate, CompanyProfile, FieldKey, FieldPosition, FontFamily, PrinterType } from '../core/types';
+import { api } from '../platform/api';
+import { measureText } from '../platform/measure';
+import { useApp } from '../state/AppContext';
+import { Button } from './ui';
 
 const FIELD_LABELS: Record<FieldKey, string> = {
   date: 'Date',
-  payee: 'Pay (Payee)',
-  amountWords: 'Amount in Words',
-  amountFigures: 'Amount Ksh',
+  payee: 'Payee',
+  amountFigures: 'Amount in figures',
+  amountWords: 'Amount in words',
 };
 
 const FIELD_COLORS: Record<FieldKey, string> = {
   date: '#2196F3',
   payee: '#4CAF50',
-  amountWords: '#FF9800',
   amountFigures: '#E91E63',
+  amountWords: '#FF9800',
 };
 
-// Sample values that match real NCBA cheque format
-const SAMPLE: Record<FieldKey, string> = {
+// A long amount so the second line of the words field can be checked too.
+const SAMPLE: ChequeValues = {
   date: '05/06/2026',
-  payee: 'Paul Angalushe',
-  amountWords: 'Fifty Eight Thousand Only',
-  amountFigures: '58,000/=',
+  payee: 'Sample Payee Name Limited',
+  amountFigures: '1,234,567/=',
+  amountWords: 'One Million Two Hundred Thirty Four Thousand Five Hundred Sixty Seven Only',
 };
 
-// 1mm = SCALE px on screen
-const SCALE = 3.2;
+const SCALE = 3.2; // screen pixels per mm
+const PT_TO_MM = 25.4 / 72;
+const FONTS: FontFamily[] = ['Arial', 'Courier New', 'Times New Roman'];
+const round1 = (n: number) => Math.round(n * 10) / 10;
 
-interface Props {
-  company: CompanyProfile;
+function NumberInput({ label, value, onChange, step = 0.5, hint }: { label: string; value: number; onChange: (n: number) => void; step?: number; hint?: string }) {
+  return (
+    <label className="block">
+      <span className="text-xs text-gray-500">{label}</span>
+      <div className="flex items-center gap-1 mt-1">
+        <button type="button" onClick={() => onChange(round1(value - step))} className="w-6 h-6 border rounded text-sm hover:bg-gray-100" aria-label={`Decrease ${label}`}>
+          −
+        </button>
+        <input
+          type="number"
+          className="w-full min-w-0 border rounded px-1 py-0.5 text-xs text-center"
+          value={value}
+          step={step}
+          onChange={(e) => {
+            const n = parseFloat(e.target.value);
+            if (Number.isFinite(n)) onChange(n);
+          }}
+        />
+        <button type="button" onClick={() => onChange(round1(value + step))} className="w-6 h-6 border rounded text-sm hover:bg-gray-100" aria-label={`Increase ${label}`}>
+          +
+        </button>
+      </div>
+      {hint && <span className="block text-xs text-gray-400 leading-tight mt-0.5">{hint}</span>}
+    </label>
+  );
 }
 
-export function CalibrationTool({ company }: Props) {
-  const { dispatch } = useApp();
-  const [template, setTemplate] = useState<ChequeTemplate>(
-    structuredClone(company.template)
-  );
-  const [printerType, setPrinterType] = useState<PrinterType>(
-    company.printerType || 'laser'
-  );
-  const [offsetX, setOffsetX] = useState(company.printerOffsetX ?? 0);
-  const [offsetY, setOffsetY] = useState(company.printerOffsetY ?? 0);
+/** Positions the four printed fields on one company's cheque and test-prints them. */
+export function CalibrationTool({ company }: { company: CompanyProfile }) {
+  const { store, run, notify } = useApp();
+  const [template, setTemplate] = useState<ChequeTemplate>(() => structuredClone(company.template));
+  const [printerType, setPrinterType] = useState<PrinterType>(company.printerType);
+  const [offsetX, setOffsetX] = useState(company.printerOffsetX);
+  const [offsetY, setOffsetY] = useState(company.printerOffsetY);
   const [selected, setSelected] = useState<FieldKey | null>(null);
-  const [dragging, setDragging] = useState<FieldKey | null>(null);
-  const [dragStart, setDragStart] = useState<{
-    mx: number;
-    my: number;
-    fx: number;
-    fy: number;
-  } | null>(null);
+  const [drag, setDrag] = useState<{ key: FieldKey; mx: number; my: number; fx: number; fy: number } | null>(null);
   const [bgImage, setBgImage] = useState<string | null>(null);
-  const canvasRef = useRef<HTMLDivElement>(null);
+  const [dirty, setDirty] = useState(false);
   const bgInputRef = useRef<HTMLInputElement>(null);
 
-  const W = template.chequeWidth * SCALE;
-  const H = template.chequeHeight * SCALE;
+  const others = store.companies.filter((c) => c.id !== company.id);
+  const draft = { template, printerOffsetX: offsetX, printerOffsetY: offsetY };
 
-  function updateField(key: FieldKey, patch: Partial<FieldPosition>) {
-    setTemplate((t) => ({
-      ...t,
-      fields: { ...t.fields, [key]: { ...t.fields[key], ...patch } },
-    }));
+  function change(next: ChequeTemplate) {
+    setTemplate(next);
+    setDirty(true);
   }
 
-  function nudge(key: FieldKey, axis: 'x' | 'y', delta: number) {
-    const val = template.fields[key][axis];
-    updateField(key, { [axis]: Math.max(0, parseFloat((val + delta).toFixed(1))) });
+  function updateField(key: FieldKey, patch: Partial<FieldPosition>) {
+    change({ ...template, fields: { ...template.fields, [key]: { ...template.fields[key], ...patch } } });
+  }
+
+  useEffect(() => {
+    if (!drag) return;
+    const onMove = (e: MouseEvent) => {
+      const x = round1(drag.fx + (e.clientX - drag.mx) / SCALE);
+      const y = round1(drag.fy + (e.clientY - drag.my) / SCALE);
+      setTemplate((t) => ({
+        ...t,
+        fields: {
+          ...t.fields,
+          [drag.key]: {
+            ...t.fields[drag.key],
+            x: Math.max(0, Math.min(t.chequeWidth - 5, x)),
+            y: Math.max(0, Math.min(t.chequeHeight - 3, y)),
+          },
+        },
+      }));
+      setDirty(true);
+    };
+    const onUp = () => setDrag(null);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [drag]);
+
+  function startDrag(e: ReactMouseEvent, key: FieldKey) {
+    e.preventDefault();
+    e.stopPropagation();
+    setSelected(key);
+    setDrag({ key, mx: e.clientX, my: e.clientY, fx: template.fields[key].x, fy: template.fields[key].y });
   }
 
   function save() {
-    dispatch({
-      type: 'UPSERT_COMPANY',
-      company: {
-        ...company,
-        template,
-        printerType,
-        printerOffsetX: offsetX,
-        printerOffsetY: offsetY,
-      },
+    const ok = run((s, ctx) => {
+      const latest = s.companies.find((c) => c.id === company.id);
+      if (!latest) return s;
+      return saveCompany(s, ctx, { ...latest, template, printerType, printerOffsetX: offsetX, printerOffsetY: offsetY });
     });
+    if (ok) {
+      setDirty(false);
+      notify('success', `Layout saved for ${company.name}.`);
+    }
+  }
+
+  function choosePrinterType(type: PrinterType) {
+    setPrinterType(type);
+    // Dot-matrix printers are sharpest and fastest in a fixed-width font.
+    const fontFamily: FontFamily = type === 'dot_matrix' ? 'Courier New' : 'Arial';
+    const fields = { ...template.fields };
+    for (const key of FIELD_KEYS) fields[key] = { ...fields[key], fontFamily };
+    change({ ...template, fields });
+  }
+
+  function copyFrom(id: string) {
+    const source = store.companies.find((c) => c.id === id);
+    if (!source) return;
+    change(structuredClone(source.template));
+    setPrinterType(source.printerType);
+    setOffsetX(source.printerOffsetX);
+    setOffsetY(source.printerOffsetY);
+    notify('info', `Copied the layout of ${source.name}. Adjust what differs, then save.`);
   }
 
   function resetToDefault() {
-    setTemplate(structuredClone(DEFAULT_TEMPLATE));
+    change(structuredClone(DEFAULT_TEMPLATE));
     setOffsetX(0);
     setOffsetY(0);
   }
 
-  function handleBgUpload(e: React.ChangeEvent<HTMLInputElement>) {
+  function loadScan(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = (ev) => setBgImage(ev.target?.result as string);
+    reader.onload = () => setBgImage(reader.result as string);
     reader.readAsDataURL(file);
   }
 
-  const onMouseDown = useCallback(
-    (e: React.MouseEvent, key: FieldKey) => {
-      e.preventDefault();
-      e.stopPropagation();
-      setSelected(key);
-      setDragging(key);
-      const field = template.fields[key];
-      setDragStart({ mx: e.clientX, my: e.clientY, fx: field.x, fy: field.y });
-    },
-    [template]
-  );
-
-  useEffect(() => {
-    function onMouseMove(e: MouseEvent) {
-      if (!dragging || !dragStart) return;
-      const dx = (e.clientX - dragStart.mx) / SCALE;
-      const dy = (e.clientY - dragStart.my) / SCALE;
-      updateField(dragging, {
-        x: Math.max(
-          0,
-          Math.min(
-            template.chequeWidth - 10,
-            parseFloat((dragStart.fx + dx).toFixed(1))
-          )
-        ),
-        y: Math.max(
-          0,
-          Math.min(
-            template.chequeHeight - 5,
-            parseFloat((dragStart.fy + dy).toFixed(1))
-          )
-        ),
-      });
+  async function printTest() {
+    const layout = layoutCheque(SAMPLE, draft, measureText);
+    const html = buildPrintHtml([layout], template, { title: `Test print — ${company.name}`, guides: true });
+    try {
+      const result = await api.print({ html, ...pageSizeMm(template), deviceName: company.printerName });
+      if (result.ok) notify('success', 'Test page sent. Hold it against a real cheque up to the light to compare.');
+      else if (result.reason !== 'cancelled') notify('error', `The printer reported a problem: ${result.reason}`);
+    } catch (err) {
+      notify('error', `Could not print: ${err instanceof Error ? err.message : 'unknown error'}`);
     }
-    function onMouseUp() {
-      setDragging(null);
-      setDragStart(null);
-    }
-    window.addEventListener('mousemove', onMouseMove);
-    window.addEventListener('mouseup', onMouseUp);
-    return () => {
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-    };
-  }, [dragging, dragStart, template.chequeWidth, template.chequeHeight]);
-
-  function printTest() {
-    const win = window.open('', '_blank');
-    if (!win) return;
-    const top = template.pageTopOffset;
-    const ox = offsetX;
-    const oy = offsetY;
-    const f = template.fields;
-
-    const field = (key: FieldKey, value: string) => {
-      const p = f[key];
-      const wrapStyle = p.wrap
-        ? `white-space:normal;overflow:visible;height:${(p.height || 15)}mm;`
-        : `white-space:nowrap;overflow:hidden;`;
-      return `<div style="
-        position:absolute;
-        left:${p.x + ox}mm;
-        top:${p.y + top + oy}mm;
-        width:${p.width}mm;
-        font-family:'${p.fontFamily}',${printerType === 'dot_matrix' ? 'monospace' : 'sans-serif'};
-        font-size:${p.fontSize}pt;
-        font-weight:${p.fontWeight};
-        text-align:${p.align};
-        ${wrapStyle}
-      ">${value}</div>`;
-    };
-
-    const chequeH = template.chequeHeight + top;
-
-    win.document.write(`<!DOCTYPE html>
-<html><head>
-<title>Test Print — ${company.name}</title>
-<style>
-  * { margin:0; padding:0; box-sizing:border-box; }
-  @page { size:${template.chequeWidth}mm ${chequeH}mm; margin:0; }
-  body { width:${template.chequeWidth}mm; height:${chequeH}mm; position:relative; }
-  .border-top { position:absolute; top:${top}mm; left:0; right:0; border-top:0.3pt dashed #aaa; }
-  .border-bot { position:absolute; top:${chequeH - 0.5}mm; left:0; right:0; border-top:0.3pt dashed #aaa; }
-</style>
-</head><body>
-  <div class="border-top"></div>
-  ${field('date', SAMPLE.date)}
-  ${field('payee', SAMPLE.payee)}
-  ${field('amountFigures', SAMPLE.amountFigures)}
-  ${field('amountWords', SAMPLE.amountWords)}
-  <div class="border-bot"></div>
-</body></html>`);
-    win.document.close();
-    setTimeout(() => win.print(), 300);
   }
 
-  const selField = selected ? template.fields[selected] : null;
+  // The on-screen cheque shows positions on the leaf itself, without printer offsets.
+  const screenLayout = layoutCheque(SAMPLE, { template: { ...template, pageTopOffset: 0 }, printerOffsetX: 0, printerOffsetY: 0 }, measureText);
+  const sel = selected ? template.fields[selected] : null;
 
   return (
-    <div className="space-y-6">
-      {/* Toolbar */}
+    <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2 text-sm text-gray-600">
-          <Info size={14} />
-          Drag fields to position. Use +/− nudge for 0.5 mm precision.
-        </div>
+        <p className="flex items-center gap-2 text-sm text-gray-600">
+          <Info size={14} /> Drag a field, or select it and nudge by 0.5 mm. Always confirm with a test print on plain paper.
+        </p>
         <div className="flex flex-wrap gap-2">
-          <button
-            onClick={() => bgInputRef.current?.click()}
-            className="flex items-center gap-2 px-3 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600 transition-colors"
-          >
-            <Upload size={14} />
-            Load cheque scan
-          </button>
-          <input
-            ref={bgInputRef}
-            type="file"
-            accept="image/*"
-            className="hidden"
-            onChange={handleBgUpload}
-          />
-          <button
-            onClick={resetToDefault}
-            className="flex items-center gap-2 px-3 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-600 transition-colors"
-          >
-            <RefreshCw size={14} />
-            Reset defaults
-          </button>
-          <button
-            onClick={printTest}
-            className="flex items-center gap-2 px-3 py-2 text-sm border border-ncba-teal text-ncba-teal rounded-lg hover:bg-ncba-light transition-colors"
-          >
-            <Printer size={14} />
-            Print test
-          </button>
-          <button
-            onClick={save}
-            className="flex items-center gap-2 px-4 py-2 text-sm bg-ncba-teal text-white rounded-lg hover:bg-ncba-dark transition-colors"
-          >
-            <Save size={14} />
-            Save positions
-          </button>
+          {others.length > 0 && (
+            <label className="flex items-center gap-1.5 text-sm border border-gray-300 rounded-lg px-3 py-2 text-gray-700 bg-white">
+              <Copy size={14} />
+              <select className="bg-transparent text-sm outline-none" value="" onChange={(e) => copyFrom(e.target.value)} aria-label="Copy layout from another company">
+                <option value="">Copy layout from…</option>
+                {others.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          <Button onClick={() => bgInputRef.current?.click()}>
+            <Upload size={14} /> Cheque scan
+          </Button>
+          <input ref={bgInputRef} type="file" accept="image/*" className="hidden" onChange={loadScan} />
+          <Button onClick={resetToDefault}>
+            <RefreshCw size={14} /> Reset
+          </Button>
+          <Button onClick={() => void printTest()} data-testid="print-test">
+            <Printer size={14} /> Print test
+          </Button>
+          <Button variant="primary" onClick={save} data-testid="save-layout">
+            <Save size={14} /> {dirty ? 'Save layout *' : 'Save layout'}
+          </Button>
         </div>
       </div>
 
-      <div className="flex gap-6">
-        {/* Visual canvas */}
-        <div className="flex-1 overflow-auto">
+      <div className="space-y-5">
+        <div className="overflow-auto pt-3">
           <p className="text-xs text-gray-500 mb-2">
-            Cheque: {template.chequeWidth} × {template.chequeHeight} mm — pre-printed labels (Pay, Kenya Shillings, Ksh, Date) are on the physical cheque
+            {template.chequeWidth} × {template.chequeHeight} mm. "Pay", "Kenya Shillings", "Ksh" and "Date" are already printed on the cheque.
           </p>
           <div
-            ref={canvasRef}
             className="relative border-2 border-dashed border-gray-400 bg-gray-100 select-none"
-            style={{ width: W, height: H, cursor: dragging ? 'grabbing' : 'default' }}
+            style={{ width: template.chequeWidth * SCALE, height: template.chequeHeight * SCALE, cursor: drag ? 'grabbing' : 'default' }}
             onClick={() => setSelected(null)}
           >
-            {bgImage && (
-              <img
-                src={bgImage}
-                alt="cheque background"
-                className="absolute inset-0 w-full h-full object-fill opacity-70"
-                draggable={false}
-              />
-            )}
+            {bgImage && <img src={bgImage} alt="" className="absolute inset-0 w-full h-full object-fill opacity-70" draggable={false} />}
 
-            {(Object.keys(template.fields) as FieldKey[]).map((key) => {
+            {[25, 50, 75, 100, 125, 150, 175, 200].map((mm) => (
+              <div key={`v${mm}`} className="absolute top-0 bottom-0 pointer-events-none" style={{ left: mm * SCALE, borderLeft: '1px solid rgba(0,0,0,0.07)' }} />
+            ))}
+            {[20, 40, 60, 80].map((mm) => (
+              <div key={`h${mm}`} className="absolute left-0 right-0 pointer-events-none" style={{ top: mm * SCALE, borderTop: '1px solid rgba(0,0,0,0.07)' }} />
+            ))}
+
+            {FIELD_KEYS.map((key) => {
               const f = template.fields[key];
-              const isSelected = selected === key;
+              const placed = screenLayout.fields.find((p) => p.key === key)!;
               const color = FIELD_COLORS[key];
-
+              const boxHeight = f.wrap ? f.height ?? 18 : placed.lineHeightMm;
               return (
                 <div
                   key={key}
-                  onMouseDown={(e) => onMouseDown(e, key)}
+                  onMouseDown={(e) => startDrag(e, key)}
+                  onClick={(e) => e.stopPropagation()}
                   style={{
                     position: 'absolute',
                     left: f.x * SCALE,
                     top: f.y * SCALE,
                     width: f.width * SCALE,
-                    height: f.wrap ? (f.height || 15) * SCALE : undefined,
+                    height: boxHeight * SCALE,
                     cursor: 'grab',
-                    outline: isSelected ? `2px solid ${color}` : `1px dashed ${color}`,
+                    outline: selected === key ? `2px solid ${color}` : `1px dashed ${color}`,
                     backgroundColor: `${color}20`,
-                    padding: '1px 3px',
-                    userSelect: 'none',
-                    zIndex: isSelected ? 10 : 1,
-                    overflow: 'hidden',
-                  }}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setSelected(key);
+                    zIndex: selected === key ? 10 : 1,
                   }}
                 >
-                  <span
-                    style={{
-                      fontFamily: f.fontFamily,
-                      fontSize: f.fontSize * SCALE * 0.38,
-                      fontWeight: f.fontWeight,
-                      color: '#222',
-                      whiteSpace: f.wrap ? 'normal' : 'nowrap',
-                      overflow: 'hidden',
-                      display: 'block',
-                      maxWidth: f.width * SCALE,
-                      wordBreak: f.wrap ? 'break-word' : undefined,
-                    }}
-                  >
-                    {SAMPLE[key]}
-                  </span>
-                  <span
-                    style={{
-                      position: 'absolute',
-                      top: -14,
-                      left: 0,
-                      fontSize: 9,
-                      color,
-                      fontWeight: 'bold',
-                      whiteSpace: 'nowrap',
-                    }}
-                  >
+                  <span style={{ position: 'absolute', top: -14, left: 0, fontSize: 9, color, fontWeight: 'bold', whiteSpace: 'nowrap' }}>
                     {FIELD_LABELS[key]}
+                    {placed.overflow ? ' — does not fit' : placed.fontPt < f.fontSize ? ` — shrunk to ${placed.fontPt}pt` : ''}
                   </span>
+                  {placed.lines.map((line, i) => (
+                    <span
+                      key={i}
+                      style={{
+                        position: 'absolute',
+                        left: 0,
+                        top: (line.yMm - f.y) * SCALE,
+                        width: '100%',
+                        height: placed.lineHeightMm * SCALE,
+                        lineHeight: `${placed.lineHeightMm * SCALE}px`,
+                        fontFamily: FONT_STACKS[placed.fontFamily],
+                        fontSize: placed.fontPt * PT_TO_MM * SCALE,
+                        fontWeight: placed.fontWeight,
+                        textAlign: placed.align,
+                        whiteSpace: 'pre',
+                        color: '#222',
+                      }}
+                    >
+                      {line.text}
+                    </span>
+                  ))}
                 </div>
               );
             })}
-
-            {/* Light grid guides at 25mm intervals */}
-            <div className="absolute inset-0 pointer-events-none">
-              {[25, 50, 75, 100, 125, 150, 175, 200].map((mm) => (
-                <div
-                  key={mm}
-                  style={{
-                    position: 'absolute',
-                    left: mm * SCALE,
-                    top: 0,
-                    bottom: 0,
-                    borderLeft: '1px solid rgba(0,0,0,0.07)',
-                  }}
-                />
-              ))}
-              {[20, 40, 60].map((mm) => (
-                <div
-                  key={mm}
-                  style={{
-                    position: 'absolute',
-                    top: mm * SCALE,
-                    left: 0,
-                    right: 0,
-                    borderTop: '1px solid rgba(0,0,0,0.07)',
-                  }}
-                />
-              ))}
-            </div>
           </div>
         </div>
 
-        {/* Control panel */}
-        <div className="w-72 shrink-0 space-y-4">
-          {/* Field selector */}
-          <div>
-            <p className="text-xs font-medium text-gray-500 mb-2">Select field to edit</p>
-            <div className="space-y-1">
-              {(Object.keys(template.fields) as FieldKey[]).map((key) => (
-                <button
-                  key={key}
-                  onClick={() => setSelected(key)}
-                  className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-left transition-colors ${
-                    selected === key
-                      ? 'bg-gray-800 text-white'
-                      : 'hover:bg-gray-100 text-gray-700'
-                  }`}
-                >
-                  <span
-                    className="w-3 h-3 rounded-full shrink-0"
-                    style={{ backgroundColor: FIELD_COLORS[key] }}
-                  />
-                  {FIELD_LABELS[key]}
-                  {selected === key && <Move size={12} className="ml-auto opacity-60" />}
-                </button>
-              ))}
-            </div>
+        <div className="grid grid-cols-3 gap-4 items-start">
+          <div className="space-y-3">
+          <div className="space-y-1">
+            {FIELD_KEYS.map((key) => (
+              <button
+                key={key}
+                onClick={() => setSelected(key)}
+                className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-left transition-colors ${
+                  selected === key ? 'bg-gray-800 text-white' : 'hover:bg-gray-100 text-gray-700'
+                }`}
+              >
+                <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: FIELD_COLORS[key] }} />
+                {FIELD_LABELS[key]}
+              </button>
+            ))}
           </div>
 
-          {/* Position controls for selected field */}
-          {selected && selField && (
-            <div className="border border-gray-200 rounded-lg p-3 space-y-3">
+          {selected && sel && (
+            <div className="border border-gray-200 rounded-lg p-3 space-y-3 bg-white">
               <p className="text-xs font-semibold text-gray-700">{FIELD_LABELS[selected]}</p>
-
               <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="text-xs text-gray-500">X (mm from left)</label>
-                  <div className="flex items-center gap-1 mt-1">
-                    <button
-                      onClick={() => nudge(selected, 'x', -0.5)}
-                      className="w-6 h-6 flex items-center justify-center border rounded text-sm hover:bg-gray-100"
-                    >
-                      −
-                    </button>
-                    <input
-                      type="number"
-                      className="w-14 border rounded px-1 py-0.5 text-xs text-center"
-                      value={selField.x}
-                      step={0.5}
-                      onChange={(e) =>
-                        updateField(selected, { x: parseFloat(e.target.value) || 0 })
-                      }
-                    />
-                    <button
-                      onClick={() => nudge(selected, 'x', 0.5)}
-                      className="w-6 h-6 flex items-center justify-center border rounded text-sm hover:bg-gray-100"
-                    >
-                      +
-                    </button>
-                  </div>
-                </div>
-                <div>
-                  <label className="text-xs text-gray-500">Y (mm from top)</label>
-                  <div className="flex items-center gap-1 mt-1">
-                    <button
-                      onClick={() => nudge(selected, 'y', -0.5)}
-                      className="w-6 h-6 flex items-center justify-center border rounded text-sm hover:bg-gray-100"
-                    >
-                      −
-                    </button>
-                    <input
-                      type="number"
-                      className="w-14 border rounded px-1 py-0.5 text-xs text-center"
-                      value={selField.y}
-                      step={0.5}
-                      onChange={(e) =>
-                        updateField(selected, { y: parseFloat(e.target.value) || 0 })
-                      }
-                    />
-                    <button
-                      onClick={() => nudge(selected, 'y', 0.5)}
-                      className="w-6 h-6 flex items-center justify-center border rounded text-sm hover:bg-gray-100"
-                    >
-                      +
-                    </button>
-                  </div>
-                </div>
+                <NumberInput label="X (mm from left)" value={sel.x} onChange={(x) => updateField(selected, { x: Math.max(0, x) })} />
+                <NumberInput label="Y (mm from top)" value={sel.y} onChange={(y) => updateField(selected, { y: Math.max(0, y) })} />
+                <NumberInput label="Width (mm)" value={sel.width} step={1} onChange={(width) => updateField(selected, { width: Math.max(5, width) })} />
+                <NumberInput label="Font size (pt)" value={sel.fontSize} step={0.5} onChange={(fontSize) => updateField(selected, { fontSize: Math.min(24, Math.max(6, fontSize)) })} />
               </div>
-
-              <div>
-                <label className="text-xs text-gray-500">Width (mm)</label>
-                <input
-                  type="number"
-                  className="mt-1 w-full border rounded px-2 py-1 text-xs"
-                  value={selField.width}
-                  step={1}
-                  onChange={(e) =>
-                    updateField(selected, { width: parseFloat(e.target.value) || 10 })
-                  }
-                />
-              </div>
-
-              {selField.wrap && (
-                <div>
-                  <label className="text-xs text-gray-500">
-                    Wrap height (mm) — space for 2 lines
-                  </label>
-                  <input
-                    type="number"
-                    className="mt-1 w-full border rounded px-2 py-1 text-xs"
-                    value={selField.height || 18}
-                    step={1}
-                    onChange={(e) =>
-                      updateField(selected, { height: parseFloat(e.target.value) || 18 })
-                    }
-                  />
-                </div>
-              )}
-
               <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="text-xs text-gray-500">Font size (pt)</label>
-                  <input
-                    type="number"
-                    className="mt-1 w-full border rounded px-2 py-1 text-xs"
-                    value={selField.fontSize}
-                    min={6}
-                    max={18}
-                    onChange={(e) =>
-                      updateField(selected, { fontSize: parseInt(e.target.value) || 10 })
-                    }
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-gray-500">Align</label>
-                  <select
-                    className="mt-1 w-full border rounded px-1 py-1 text-xs"
-                    value={selField.align}
-                    onChange={(e) =>
-                      updateField(selected, {
-                        align: e.target.value as FieldPosition['align'],
-                      })
-                    }
-                  >
-                    <option value="left">Left</option>
-                    <option value="center">Center</option>
-                    <option value="right">Right</option>
+                <label className="block">
+                  <span className="text-xs text-gray-500">Font</span>
+                  <select className="mt-1 w-full border rounded px-1 py-1 text-xs" value={sel.fontFamily} onChange={(e) => updateField(selected, { fontFamily: e.target.value as FontFamily })}>
+                    {FONTS.map((f) => (
+                      <option key={f}>{f}</option>
+                    ))}
                   </select>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="text-xs text-gray-500">Font weight</label>
-                  <select
-                    className="mt-1 w-full border rounded px-1 py-1 text-xs"
-                    value={selField.fontWeight}
-                    onChange={(e) =>
-                      updateField(selected, {
-                        fontWeight: e.target.value as FieldPosition['fontWeight'],
-                      })
-                    }
-                  >
+                </label>
+                <label className="block">
+                  <span className="text-xs text-gray-500">Weight</span>
+                  <select className="mt-1 w-full border rounded px-1 py-1 text-xs" value={sel.fontWeight} onChange={(e) => updateField(selected, { fontWeight: e.target.value as FieldPosition['fontWeight'] })}>
                     <option value="normal">Normal</option>
                     <option value="bold">Bold</option>
                   </select>
-                </div>
-                <div>
-                  <label className="text-xs text-gray-500">Word wrap</label>
+                </label>
+                <label className="block">
+                  <span className="text-xs text-gray-500">Align</span>
+                  <select className="mt-1 w-full border rounded px-1 py-1 text-xs" value={sel.align} onChange={(e) => updateField(selected, { align: e.target.value as FieldPosition['align'] })}>
+                    <option value="left">Left</option>
+                    <option value="center">Centre</option>
+                    <option value="right">Right</option>
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="text-xs text-gray-500">Lines</span>
                   <select
                     className="mt-1 w-full border rounded px-1 py-1 text-xs"
-                    value={selField.wrap ? 'yes' : 'no'}
+                    value={sel.wrap ? 'yes' : 'no'}
                     onChange={(e) =>
-                      updateField(selected, { wrap: e.target.value === 'yes' })
+                      updateField(selected, e.target.value === 'yes' ? { wrap: true, height: sel.height ?? 18, lineSpacing: sel.lineSpacing ?? 8.5 } : { wrap: false })
                     }
                   >
-                    <option value="no">No wrap</option>
-                    <option value="yes">Wrap</option>
+                    <option value="no">One line</option>
+                    <option value="yes">Wraps</option>
                   </select>
-                </div>
+                </label>
               </div>
-            </div>
-          )}
-
-          {/* Printer offset */}
-          <div className="border border-gray-200 rounded-lg p-3 space-y-3">
-            <p className="text-xs font-semibold text-gray-700">Printer settings</p>
-
-            <div>
-              <label className="text-xs text-gray-500">Printer type</label>
-              <select
-                className="mt-1 w-full border rounded px-2 py-1 text-sm"
-                value={printerType}
-                onChange={(e) => setPrinterType(e.target.value as PrinterType)}
-              >
-                <option value="laser">Laser (HP LaserJet etc.)</option>
-                <option value="dot_matrix">Dot Matrix</option>
-              </select>
-              {printerType === 'dot_matrix' && (
-                <p className="text-xs text-amber-600 mt-1">
-                  Dot matrix uses Courier New font for all fields.
-                </p>
+              {sel.wrap && (
+                <div className="grid grid-cols-2 gap-2">
+                  <NumberInput label="Line spacing (mm)" value={sel.lineSpacing ?? 8.5} onChange={(lineSpacing) => updateField(selected, { lineSpacing: Math.max(2, lineSpacing) })} hint="Gap between the cheque's ruled lines" />
+                  <NumberInput label="Space (mm)" value={sel.height ?? 18} step={1} onChange={(height) => updateField(selected, { height: Math.max(4, height) })} hint="Total height for all lines" />
+                </div>
               )}
             </div>
+          )}
+          {!selected && <p className="text-xs text-gray-400 px-1">Select a field to change its position, size or font.</p>}
+          </div>
 
+          <div className="border border-gray-200 rounded-lg p-3 space-y-3 bg-white">
+            <p className="text-xs font-semibold text-gray-700">Printer</p>
+            <label className="block">
+              <span className="text-xs text-gray-500">Type</span>
+              <select className="mt-1 w-full border rounded px-2 py-1 text-sm" value={printerType} onChange={(e) => choosePrinterType(e.target.value as PrinterType)}>
+                <option value="laser">Laser / inkjet</option>
+                <option value="dot_matrix">Dot matrix</option>
+              </select>
+            </label>
             <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="text-xs text-gray-500">Offset X (mm)</label>
-                <p className="text-xs text-gray-400 leading-tight">Shift all text left/right</p>
-                <div className="flex items-center gap-1 mt-1">
-                  <button
-                    onClick={() => setOffsetX((v) => parseFloat((v - 0.5).toFixed(1)))}
-                    className="w-6 h-6 flex items-center justify-center border rounded text-sm hover:bg-gray-100"
-                  >
-                    −
-                  </button>
-                  <input
-                    type="number"
-                    className="w-14 border rounded px-1 py-0.5 text-xs text-center"
-                    value={offsetX}
-                    step={0.5}
-                    onChange={(e) => setOffsetX(parseFloat(e.target.value) || 0)}
-                  />
-                  <button
-                    onClick={() => setOffsetX((v) => parseFloat((v + 0.5).toFixed(1)))}
-                    className="w-6 h-6 flex items-center justify-center border rounded text-sm hover:bg-gray-100"
-                  >
-                    +
-                  </button>
-                </div>
-              </div>
-              <div>
-                <label className="text-xs text-gray-500">Offset Y (mm)</label>
-                <p className="text-xs text-gray-400 leading-tight">Shift all text up/down</p>
-                <div className="flex items-center gap-1 mt-1">
-                  <button
-                    onClick={() => setOffsetY((v) => parseFloat((v - 0.5).toFixed(1)))}
-                    className="w-6 h-6 flex items-center justify-center border rounded text-sm hover:bg-gray-100"
-                  >
-                    −
-                  </button>
-                  <input
-                    type="number"
-                    className="w-14 border rounded px-1 py-0.5 text-xs text-center"
-                    value={offsetY}
-                    step={0.5}
-                    onChange={(e) => setOffsetY(parseFloat(e.target.value) || 0)}
-                  />
-                  <button
-                    onClick={() => setOffsetY((v) => parseFloat((v + 0.5).toFixed(1)))}
-                    className="w-6 h-6 flex items-center justify-center border rounded text-sm hover:bg-gray-100"
-                  >
-                    +
-                  </button>
-                </div>
-              </div>
+              <NumberInput label="Shift right (mm)" value={offsetX} onChange={(n) => { setOffsetX(n); setDirty(true); }} hint="Negative = left" />
+              <NumberInput label="Shift down (mm)" value={offsetY} onChange={(n) => { setOffsetY(n); setDirty(true); }} hint="Negative = up" />
             </div>
           </div>
 
-          {/* Cheque dimensions & page offset */}
-          <div className="border border-gray-200 rounded-lg p-3 space-y-3">
-            <p className="text-xs font-semibold text-gray-700">Cheque & page dimensions</p>
+          <div className="border border-gray-200 rounded-lg p-3 space-y-3 bg-white">
+            <p className="text-xs font-semibold text-gray-700">Cheque size</p>
             <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="text-xs text-gray-500">Width (mm)</label>
-                <input
-                  type="number"
-                  className="mt-1 w-full border rounded px-2 py-1 text-xs"
-                  value={template.chequeWidth}
-                  step={1}
-                  onChange={(e) =>
-                    setTemplate((t) => ({
-                      ...t,
-                      chequeWidth: parseFloat(e.target.value) || 215,
-                    }))
-                  }
-                />
-              </div>
-              <div>
-                <label className="text-xs text-gray-500">Height (mm)</label>
-                <input
-                  type="number"
-                  className="mt-1 w-full border rounded px-2 py-1 text-xs"
-                  value={template.chequeHeight}
-                  step={1}
-                  onChange={(e) =>
-                    setTemplate((t) => ({
-                      ...t,
-                      chequeHeight: parseFloat(e.target.value) || 85,
-                    }))
-                  }
-                />
-              </div>
+              <NumberInput label="Width (mm)" value={template.chequeWidth} step={1} onChange={(n) => change({ ...template, chequeWidth: Math.min(400, Math.max(50, n)) })} />
+              <NumberInput label="Height (mm)" value={template.chequeHeight} step={1} onChange={(n) => change({ ...template, chequeHeight: Math.min(400, Math.max(30, n)) })} />
             </div>
-            <div>
-              <label className="text-xs text-gray-500">Page top offset (mm)</label>
-              <p className="text-xs text-gray-400">0 for standalone cheque leaf. For A4 with cheque part-way down, set the distance from paper top.</p>
-              <input
-                type="number"
-                className="mt-1 w-full border rounded px-2 py-1 text-sm"
-                value={template.pageTopOffset}
-                step={1}
-                min={0}
-                onChange={(e) =>
-                  setTemplate((t) => ({
-                    ...t,
-                    pageTopOffset: parseFloat(e.target.value) || 0,
-                  }))
-                }
-              />
-            </div>
+            <NumberInput
+              label="Top of sheet to top of cheque (mm)"
+              value={template.pageTopOffset}
+              step={1}
+              onChange={(n) => change({ ...template, pageTopOffset: Math.max(0, n) })}
+              hint="0 for a loose cheque leaf"
+            />
           </div>
         </div>
       </div>
