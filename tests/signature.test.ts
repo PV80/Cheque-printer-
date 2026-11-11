@@ -132,6 +132,40 @@ describe('analyseSignatureZone', () => {
     expect(analyseSignatureZone(z).signed).toBe(true);
   });
 
+  it('an empty table cell is not a signature, whatever part of it is in the box', () => {
+    const z = box(60, 20);
+    // Cell sides that stop part-way down the box, and the cell's bottom edge.
+    rect(z, 20, 0, 2, 45);
+    rect(z, 220, 0, 2, 45);
+    rect(z, 20, 45, 202, 2);
+    expect(analyseSignatureZone(z).signed).toBe(false);
+  });
+
+  it('two printed underlines are not a signature', () => {
+    const z = box(60, 20);
+    // Underlines drawn with separate characters, leaving hairline gaps.
+    for (const y of [20, 70]) for (let x = 10; x < z.width - 10; x += 9) rect(z, x, y, 8, 1);
+    const result = analyseSignatureZone(z);
+    expect(result.signed).toBe(false);
+    expect(result.heightMm).toBeLessThan(1);
+  });
+
+  it('a short underline and a stub of a border are not a signature', () => {
+    const z = box(60, 20);
+    rect(z, 40, 90, 60, 2); // "Sign: ______"
+    rect(z, 150, 30, 2, 20);
+    expect(analyseSignatureZone(z).signed).toBe(false);
+  });
+
+  it('a signature written inside a table cell is still found', () => {
+    const z = box(60, 20);
+    rect(z, 5, 0, 2, z.height);
+    rect(z, z.width - 7, 0, 2, z.height);
+    rect(z, 0, z.height - 20, z.width, 3);
+    scribble(z, 8, 40, 9, BLUE);
+    expect(analyseSignatureZone(z).signed).toBe(true);
+  });
+
   it('handles an empty or malformed zone', () => {
     expect(analyseSignatureZone({ data: new Uint8ClampedArray(0), width: 0, height: 0, pxPerMm: PX_PER_MM }).signed).toBe(false);
     expect(analyseSignatureZone({ data: new Uint8ClampedArray(4), width: 10, height: 10, pxPerMm: PX_PER_MM }).signed).toBe(false);

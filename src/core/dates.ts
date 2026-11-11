@@ -28,7 +28,7 @@ export function parseDate(raw: string): string | null {
   const s = raw.trim().replace(/\s+/g, ' ');
   let m: RegExpMatchArray | null;
 
-  if ((m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/))) return toIso(+m[1], +m[2], +m[3]);
+  if ((m = s.match(/^(\d{4})[/\-.](\d{1,2})[/\-.](\d{1,2})$/))) return toIso(+m[1], +m[2], +m[3]);
 
   if ((m = s.match(/^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4}|\d{2})$/))) return toIso(+m[3], +m[2], +m[1]);
 
@@ -45,12 +45,16 @@ export function parseDate(raw: string): string | null {
   return null;
 }
 
+// Each form must start and end on a clean edge, so "2026/06/25" is never read
+// from its middle as "26/06/25".
+const EDGE_BEFORE = String.raw`(?<![\d/.\-])`;
+const EDGE_AFTER = String.raw`(?![\d/\-]|\.\d)`;
 const DATE_IN_TEXT = new RegExp(
   [
-    String.raw`\d{4}-\d{1,2}-\d{1,2}`,
-    String.raw`\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}`,
-    String.raw`\d{1,2}(?:st|nd|rd|th)?[\s\-/.]+[A-Za-z]{3,9}\.?,?[\s\-/.]+\d{2,4}`,
-    String.raw`[A-Za-z]{3,9}\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}`,
+    String.raw`${EDGE_BEFORE}\d{4}[/\-.]\d{1,2}[/\-.]\d{1,2}${EDGE_AFTER}`,
+    String.raw`${EDGE_BEFORE}\d{1,2}[/\-.]\d{1,2}[/\-.](?:\d{4}|\d{2})${EDGE_AFTER}`,
+    String.raw`${EDGE_BEFORE}\d{1,2}(?:st|nd|rd|th)?[\s\-/.]+[A-Za-z]{3,9}\.?,?[\s\-/.]+(?:\d{4}|\d{2})${EDGE_AFTER}`,
+    String.raw`\b[A-Za-z]{3,9}\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}${EDGE_AFTER}`,
   ].join('|')
 );
 
@@ -58,6 +62,64 @@ const DATE_IN_TEXT = new RegExp(
 export function findDateInText(text: string): string | null {
   const m = text.match(DATE_IN_TEXT);
   return m ? m[0] : null;
+}
+
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+/** "10 November 2026" — unmistakable, for asking a person which date is meant. */
+export function formatDateLong(iso: string): string {
+  if (!isValidIsoDate(iso)) return '';
+  const [y, m, d] = iso.split('-').map(Number);
+  return `${d} ${MONTH_NAMES[m - 1]} ${y}`;
+}
+
+function daysBetween(a: string, b: string): number {
+  const utc = (iso: string) => {
+    const [y, m, d] = iso.split('-').map(Number);
+    return Date.UTC(y, m - 1, d);
+  };
+  return Math.abs(utc(a) - utc(b)) / 86_400_000;
+}
+
+export interface DateReading {
+  iso: string; // '' when the date cannot be settled
+  note: string; // why not, in words a person can act on
+}
+
+const NEAR_DAYS = 10;
+const CLEAR_GAP_DAYS = 15;
+
+/**
+ * Reads a date from a requisition. Forms arrive with both day-first
+ * (10/11/2026 = 10 November) and month-first (10/13/2026 = 13 October) dates,
+ * so an all-number date is only accepted when it can be just one thing:
+ * either one reading is impossible, or one reading falls within a few days of
+ * when the document was produced and the other is clearly far off.
+ */
+export function readDate(raw: string, producedOn: string | undefined): DateReading {
+  const s = raw.trim().replace(/\s+/g, ' ');
+  const numeric = s.match(/^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4}|\d{2})$/);
+  if (!numeric) {
+    const iso = parseDate(s);
+    return iso ? { iso, note: '' } : { iso: '', note: `The date "${raw}" could not be read.` };
+  }
+
+  const dayFirst = toIso(+numeric[3], +numeric[2], +numeric[1]);
+  const monthFirst = toIso(+numeric[3], +numeric[1], +numeric[2]);
+  if (!dayFirst && !monthFirst) return { iso: '', note: `The date "${raw}" is not a real date.` };
+  if (!dayFirst || !monthFirst || dayFirst === monthFirst) return { iso: (dayFirst ?? monthFirst)!, note: '' };
+
+  if (producedOn && isValidIsoDate(producedOn)) {
+    const a = daysBetween(dayFirst, producedOn);
+    const b = daysBetween(monthFirst, producedOn);
+    if (Math.min(a, b) <= NEAR_DAYS && Math.abs(a - b) >= CLEAR_GAP_DAYS) {
+      return { iso: a < b ? dayFirst : monthFirst, note: '' };
+    }
+  }
+  return {
+    iso: '',
+    note: `The date ${raw} could be ${formatDateLong(dayFirst)} or ${formatDateLong(monthFirst)}. Enter the right one.`,
+  };
 }
 
 /** DD/MM/YYYY, or '' when the date is missing or invalid. */

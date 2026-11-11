@@ -18,7 +18,7 @@ const TOAST_STYLE = {
 };
 
 function Shell() {
-  const { boot, user, tab, setTab, importFiles, toasts, dismissToast, saveError } = useApp();
+  const { boot, user, tab, setTab, importFiles, toasts, dismissToast, saveError, recovered, dismissRecovered } = useApp();
   const [dragging, setDragging] = useState(false);
 
   // A PDF can be dropped anywhere in the window, on any tab.
@@ -93,6 +93,14 @@ function Shell() {
           {saveError && (
             <div className="bg-red-600 text-white text-sm px-4 py-2 text-center" role="alert">
               Changes are not being saved to disk ({saveError}). Do not print until this is fixed.
+            </div>
+          )}
+          {recovered && (
+            <div className="bg-amber-100 text-amber-900 text-sm px-4 py-2 flex items-center justify-center gap-4" role="alert">
+              The last save did not finish, so the previous saved copy was loaded. Check that your most recent entries are in the Register.
+              <button className="underline shrink-0" onClick={dismissRecovered}>
+                I have checked
+              </button>
             </div>
           )}
           <main>

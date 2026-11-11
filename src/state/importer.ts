@@ -6,9 +6,10 @@ import { createIssueChecker } from '../core/issues';
 import { parseRequisition } from '../core/parser';
 import { addCheque, chequeFromRequisition, checkFileHash, type Ctx } from '../core/store';
 import type { Requisition, SignatureResult, SignatureZone, Store, User } from '../core/types';
+
 import { api } from '../platform/api';
 import { measureText } from '../platform/measure';
-import { checkSignature, extractPages, looksLikePdf, openPdf, sha256Hex, type PdfDocument } from '../platform/pdf';
+import { checkSignature, extractPages, looksLikePdf, openPdf, producedOn, sha256Hex, type PdfDocument } from '../platform/pdf';
 
 export type ImportState = 'working' | 'queued' | 'held' | 'skipped' | 'error';
 
@@ -74,13 +75,25 @@ export async function importPdfFile(file: File, deps: ImportDeps): Promise<Impor
       };
     }
 
-    const parsed = parseRequisition(pages);
+    const { otherRequisitionPages, ...parsed } = parseRequisition(pages, { producedOn: await producedOn(pdf) });
+    if (otherRequisitionPages.length > 0) {
+      return {
+        state: 'error',
+        message: `This PDF holds more than one requisition (also on page ${otherRequisitionPages.join(', ')}). Save each one as its own PDF.`,
+      };
+    }
+
     const company = matchCompany(parsed.companyRaw, deps.getStore().companies);
-    const signature: SignatureResult = company?.signatureZone
-      ? await signatureResult(pdf, company.signatureZone)
-      : { status: 'unchecked' };
+    const zone = company?.signatureZones[parsed.documentType];
+    let signature: SignatureResult = zone ? await signatureResult(pdf, zone) : { status: 'unchecked' };
 
     await api.savePdf(fileHash, bytes);
+
+    // If the company or its signature box changed while this file was being read, check again later.
+    const companyNow = matchCompany(parsed.companyRaw, deps.getStore().companies);
+    if (companyNow?.id !== company?.id || JSON.stringify(companyNow?.signatureZones[parsed.documentType]) !== JSON.stringify(zone)) {
+      signature = { status: 'unchecked' };
+    }
 
     const now = new Date().toISOString();
     const requisition: Requisition = {
@@ -93,7 +106,7 @@ export async function importPdfFile(file: File, deps: ImportDeps): Promise<Impor
       ...parsed,
       signature,
     };
-    const cheque = chequeFromRequisition(requisition, company?.id ?? null, crypto.randomUUID(), now);
+    const cheque = chequeFromRequisition(requisition, companyNow?.id ?? null, crypto.randomUUID(), now);
 
     let replaced = false;
     const ok = deps.run((store, ctx) => {
@@ -106,7 +119,7 @@ export async function importPdfFile(file: File, deps: ImportDeps): Promise<Impor
     const store = deps.getStore();
     const added = store.cheques.find((c) => c.id === cheque.id);
     const issues = added ? createIssueChecker(store, measureText)(added) : [];
-    const label = `${company?.name ?? (parsed.companyRaw || 'Unknown company')} — cheque ${parsed.chequeNumber || '(no number)'}`;
+    const label = `${companyNow?.name ?? (parsed.companyRaw || 'Unknown company')} — cheque ${parsed.chequeNumber || '(no number)'}`;
 
     if (issues.length > 0) return { state: 'held', message: `${label}. Held: ${issues[0].message}` };
     return {

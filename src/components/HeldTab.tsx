@@ -77,6 +77,7 @@ export function HeldTab() {
           needs('a supervisor')
         );
       case 'missing_fields':
+      case 'needs_review':
       case 'amount_mismatch':
       case 'text_too_long':
         return can(user, 'edit_cheque') ? (

@@ -11,7 +11,7 @@ import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { _electron as electron } from 'playwright-core';
-import { makeImageOnlyPdf, makeRequisitionPdf, SIGNATURE_BOX } from './fixtures.mjs';
+import { makeImageOnlyPdf, makeReceiptPdf, makeRequisitionPdf, RECEIPT_SIGNATURE_BOX, SIGNATURE_BOX } from './fixtures.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '..');
@@ -111,19 +111,19 @@ const queueNumbers = (page, company) =>
 const heldIssues = (page, chq) =>
   page.locator(`[data-testid=held-list] > li[data-cheque="${chq}"] [data-issue]`).evaluateAll((els) => els.map((e) => e.dataset.issue));
 
-async function drawSignatureBox(page) {
+async function drawSignatureBox(page, area = SIGNATURE_BOX) {
   const sheet = page.locator('[data-testid=zone-page]');
   await sheet.locator('img').evaluate((img) => img.complete || new Promise((r) => (img.onload = r)));
   await sheet.evaluate((el, middle) => {
     const scroller = el.parentElement;
     scroller.scrollTop = Math.max(0, el.offsetHeight * middle - scroller.clientHeight / 2);
-  }, SIGNATURE_BOX.y + SIGNATURE_BOX.h / 2);
+  }, area.y + area.h / 2);
   const b = await sheet.boundingBox();
-  const x0 = b.x + b.width * SIGNATURE_BOX.x;
-  const y0 = b.y + b.height * SIGNATURE_BOX.y;
+  const x0 = b.x + b.width * area.x;
+  const y0 = b.y + b.height * area.y;
   await page.mouse.move(x0, y0);
   await page.mouse.down();
-  await page.mouse.move(x0 + b.width * SIGNATURE_BOX.w, y0 + b.height * SIGNATURE_BOX.h, { steps: 10 });
+  await page.mouse.move(x0 + b.width * area.w, y0 + b.height * area.h, { steps: 10 });
   await page.mouse.up();
 }
 
@@ -180,9 +180,14 @@ async function main() {
     combineB: await fixture('combine-b.pdf', { company: GI, payee: 'Combined Payee Ltd', chq: '000140', amount: '5,500/=', words: 'Five Thousand Five Hundred Only', signature: 'drawn', details: 'Second invoice' }),
     redo124: await fixture('gi-124-redo.pdf', { company: GI, payee: 'Acme Supplies Ltd', chq: '000132', amount: '15,000.50', words: 'Fifteen Thousand and Fifty Cents Only', signature: 'drawn', details: 'Re-issued after spoiled cheque' }),
     double123: await fixture('gi-123-double.pdf', { company: GI, payee: 'Paul Angalushe', chq: '000133', amount: '58,000/=', words: 'Fifty Eight Thousand Only', signature: 'drawn', details: 'Same payment again' }),
+    receipt: join(dirs.pdfs, 'gi-receipt-122.pdf'),
+    receiptUnsigned: join(dirs.pdfs, 'gi-receipt-121-unsigned.pdf'),
     notPdf: join(dirs.pdfs, 'not-a-pdf.pdf'),
     scan: join(dirs.pdfs, 'scan.pdf'),
   };
+  // The accounts-system receipt: month-first date (5 June written 06/05/2026), cheque number on a wrapped line.
+  writeFileSync(f.receipt, await makeReceiptPdf({ bank: 'I&M Bank', payee: 'JOHN SAMPLE PAYEE', date: '06/05/2026', amount: '59,000.00', chq: '122', signed: true }));
+  writeFileSync(f.receiptUnsigned, await makeReceiptPdf({ bank: 'I&M Bank', payee: 'OTHER SAMPLE PAYEE', date: '06/05/2026', amount: '1,200.00', chq: '121', signed: false }));
   writeFileSync(f.notPdf, 'this is not a pdf');
   writeFileSync(f.scan, await makeImageOnlyPdf());
 
@@ -238,7 +243,8 @@ async function main() {
   await drawSignatureBox(page);
   checkEqual(await verdict(page), true, 'sample for the second company reads SIGNED');
   await page.click('[data-testid=zone-save]');
-  await page.getByText('Set on page 1').waitFor();
+  await page.locator('[data-testid=zone-list] li[data-form="requisition_voucher"][data-set="yes"]').waitFor();
+  checkEqual(await page.locator('[data-testid=zone-list] li[data-form="payment_receipt"]').getAttribute('data-set'), 'no', 'each kind of form has its own signature box');
 
   step('Drop a mixed batch');
   results = await load(page, [f.gi130, f.gi123, f.gi124image, f.gi126annot, f.gi127typed, f.gi128mismatch, f.sh501, f.sh500, f.unknown, f.notPdf, f.scan, f.gi123]);
@@ -447,6 +453,31 @@ async function main() {
   await tab(page, 'queue');
   checkEqual(await queueNumbers(page, GI), ['000128', '000130', '000131', '000132', '000140'], 'queue is intact after restart');
   checkEqual(await queueNumbers(page, SH), ['000501'], 'second company still queued');
+
+  step('One company, two kinds of form: the accounts-system receipt');
+  results = await load(page, [f.receipt, f.receiptUnsigned]);
+  checkEqual(results.map((r) => r.state), ['held', 'held'], 'a receipt from an unknown bank account is held');
+  check(results[0].text.includes('I&M Bank (Golden Ivy Investments)') && results[0].text.includes('not recognised'), 'the bank account on the receipt identifies the cheque book');
+  await tab(page, 'held');
+  await page.locator('[data-testid=held-list] > li[data-cheque="122"]').getByRole('button', { name: 'Choose company…' }).click();
+  await page.getByRole('button', { name: GI, exact: true }).click();
+  const receiptRow = page.locator('[data-testid=held-list] > li[data-cheque="122"]');
+  await receiptRow.locator('[data-issue="signature_zone_missing"]').waitFor();
+  checkEqual(await heldIssues(page, '121'), ['signature_zone_missing'], 'the second receipt from that account is recognised too');
+  check((await receiptRow.innerText()).includes('Payment receipt'), 'held: this kind of form has no signature box yet');
+  await receiptRow.locator('[data-testid=zone-open]').click();
+  await page.locator('[data-testid=zone-form][data-form="payment_receipt"]').waitFor();
+  await drawSignatureBox(page, RECEIPT_SIGNATURE_BOX);
+  checkEqual(await verdict(page), true, 'signed receipt reads SIGNED (typed name and underline ignored)');
+  checkEqual(await trySample(page, f.receiptUnsigned), false, 'unsigned receipt reads NOT SIGNED');
+  await page.click('[data-testid=zone-save]');
+  await receiptRow.waitFor({ state: 'detached' });
+  checkEqual(await heldIssues(page, '121'), ['unsigned'], 'the unsigned receipt stays held');
+  await tab(page, 'queue');
+  const receiptInQueue = page.locator(`section[data-company="${GI}"] tr[data-cheque="122"]`);
+  check((await receiptInQueue.innerText()).includes('05/06/2026'), 'month-first date 06/05/2026 is read as 5 June');
+  check((await receiptInQueue.innerText()).includes('59,000.00'), 'payment amount is read from the receipt');
+  checkEqual((await queueNumbers(page, GI))[0], '122', 'a cheque number wrapped on to the next line is read, and sorts first');
   await app.close();
 
   console.log(`\nAll ${passed} checks passed.`);

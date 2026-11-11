@@ -1,4 +1,12 @@
-import type { CompanyProfile } from './types';
+import type { CompanyProfile, DocumentType } from './types';
+
+export const FORM_TYPES: DocumentType[] = ['requisition_voucher', 'payment_receipt', 'unknown'];
+
+export const FORM_LABELS: Record<DocumentType, string> = {
+  requisition_voucher: 'Cheque requisition voucher',
+  payment_receipt: 'Payment receipt (from the accounts system)',
+  unknown: 'Other form',
+};
 
 /**
  * Reduces a company name to a comparable form: case, punctuation and the

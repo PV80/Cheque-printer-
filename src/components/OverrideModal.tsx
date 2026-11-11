@@ -39,8 +39,13 @@ export function OverrideModal({ cheque, kind, message, onClose }: Props) {
     if (needsApprover) {
       setBusy(true);
       const found = await authenticate(store.users, username, password);
+      if (!found) {
+        await new Promise((r) => setTimeout(r, 1500)); // makes guessing passwords slow
+        setBusy(false);
+        setPassword('');
+        return setError('Wrong supervisor username or password.');
+      }
       setBusy(false);
-      if (!found) return setError('Wrong supervisor username or password.');
       if (!can(found, 'override')) return setError(`${found.displayName} is not allowed to override.`);
       approver = found;
     }

@@ -4,7 +4,7 @@
 
 import { formatMoney } from './amount';
 import { can, normaliseUsername, usernameProblem, type Permission } from './auth';
-import { findNameConflict, matchCompany, normaliseCompanyName } from './company';
+import { findNameConflict, FORM_TYPES, matchCompany, normaliseCompanyName } from './company';
 import { formatDate, isValidIsoDate } from './dates';
 import { createIssueChecker, hasOverride, normaliseChequeNumber, normalisePayee } from './issues';
 import { DEFAULT_TEMPLATE, FIELD_KEYS, type Measure } from './layout';
@@ -156,6 +156,16 @@ function sanitizeZone(raw: unknown): SignatureZone | null {
   };
 }
 
+function sanitizeZones(raw: unknown): CompanyProfile['signatureZones'] {
+  const zones: CompanyProfile['signatureZones'] = {};
+  if (!isObject(raw)) return zones;
+  for (const type of FORM_TYPES) {
+    const zone = sanitizeZone(raw[type]);
+    if (zone) zones[type] = zone;
+  }
+  return zones;
+}
+
 function cleanAliases(name: string, aliases: unknown): string[] {
   const seen = new Set([normaliseCompanyName(name)]);
   const out: string[] = [];
@@ -183,7 +193,7 @@ export function sanitizeCompany(raw: unknown): CompanyProfile | null {
     printerOffsetX: clamp(num(raw.printerOffsetX, 0), -100, 100),
     printerOffsetY: clamp(num(raw.printerOffsetY, 0), -100, 100),
     template: sanitizeTemplate(raw.template),
-    signatureZone: sanitizeZone(raw.signatureZone),
+    signatureZones: sanitizeZones(raw.signatureZones),
     loadingNote: typeof raw.loadingNote === 'string' ? raw.loadingNote : '',
   };
 }
@@ -331,7 +341,7 @@ export function saveCompany(store: Store, ctx: Ctx, input: CompanyProfile): Stor
   };
 
   // A moved signature box means earlier checks no longer apply.
-  if (existing && JSON.stringify(existing.signatureZone) !== JSON.stringify(company.signatureZone)) {
+  if (existing && JSON.stringify(existing.signatureZones) !== JSON.stringify(company.signatureZones)) {
     next = {
       ...next,
       cheques: next.cheques.map((c) => (c.status === 'pending' && c.companyId === company.id ? resetSignatures(c) : c)),
@@ -525,7 +535,9 @@ export function editCheque(store: Store, ctx: Ctx, id: string, edit: ChequeEdit)
   if (!payee) throw new StoreError('Enter the payee.');
   if (!isValidIsoDate(edit.date)) throw new StoreError('Enter a valid date.');
   if (!Number.isSafeInteger(edit.amountCents) || edit.amountCents <= 0) throw new StoreError('Enter a valid amount.');
-  if (!/^\d{1,12}$/.test(chequeNumber)) throw new StoreError('The cheque number must be digits only.');
+  if (!/^\d{1,12}$/.test(chequeNumber) || normaliseChequeNumber(chequeNumber) === '') {
+    throw new StoreError('Enter the cheque number (digits only).');
+  }
 
   const changes: string[] = [];
   if (payee !== cheque.payee) changes.push(`payee "${cheque.payee}" → "${payee}"`);
@@ -535,6 +547,8 @@ export function editCheque(store: Store, ctx: Ctx, id: string, edit: ChequeEdit)
   }
   if (chequeNumber !== cheque.chequeNumber) changes.push(`cheque number ${cheque.chequeNumber || '(none)'} → ${chequeNumber}`);
 
+  // A release of a possible double payment was for the old details; changed details are judged afresh.
+  const samePayment = payee === cheque.payee && edit.date === cheque.date && edit.amountCents === cheque.amountCents;
   const updated: Cheque = {
     ...cheque,
     payee,
@@ -543,6 +557,7 @@ export function editCheque(store: Store, ctx: Ctx, id: string, edit: ChequeEdit)
     chequeNumber,
     edited: cheque.edited || changes.length > 0,
     amountConfirmed: true,
+    overrides: samePayment ? cheque.overrides : cheque.overrides.filter((o) => o.kind !== 'duplicate_payment'),
   };
   return withLog(
     putCheque(store, updated),
@@ -572,9 +587,21 @@ export function addOverride(
   const text = reason.trim();
   if (text.length < 5) throw new StoreError('Give a reason for the override.');
 
+  // An "unsigned" release names the requisitions it covers, so it cannot be
+  // stretched over one that is added to the cheque later.
+  const requisitionIds =
+    kind === 'unsigned' ? cheque.requisitions.filter((r) => r.signature.status !== 'signed').map((r) => r.id) : undefined;
   const overrides = [
     ...cheque.overrides.filter((o) => o.kind !== kind),
-    { kind, byUserId: ctx.actor.id, byName: ctx.actor.displayName, requestedByName, reason: text, at: ctx.now },
+    {
+      kind,
+      ...(requisitionIds ? { requisitionIds } : {}),
+      byUserId: ctx.actor.id,
+      byName: ctx.actor.displayName,
+      requestedByName,
+      reason: text,
+      at: ctx.now,
+    },
   ];
   const asked = requestedByName && requestedByName !== ctx.actor.displayName ? ` (requested by ${requestedByName})` : '';
   return withLog(
@@ -626,7 +653,13 @@ export function combineCheques(store: Store, ctx: Ctx, keepId: string, mergeId: 
     requisitions: [...keep.requisitions, ...merge.requisitions],
     edited: keep.edited || merge.edited,
     amountConfirmed: keep.amountConfirmed && merge.amountConfirmed,
-    overrides: [...keep.overrides, ...merge.overrides.filter((o) => !hasOverride(keep, o.kind))],
+    // Each "unsigned" release stays tied to the requisitions it was given for.
+    // A double-payment release was for the old amount, so it is dropped.
+    overrides: [keep, merge].flatMap((c) =>
+      c.overrides
+        .filter((o) => o.kind === 'unsigned')
+        .map((o) => ({ ...o, requisitionIds: o.requisitionIds ?? c.requisitions.map((r) => r.id) }))
+    ),
   };
 
   const next = { ...store, cheques: store.cheques.filter((c) => c.id !== mergeId).map((c) => (c.id === keepId ? combined : c)) };
@@ -730,6 +763,24 @@ export function markSpoiled(store: Store, ctx: Ctx, id: string, note: string): S
   const statusNote = note.trim();
   if (statusNote.length < 3) throw new StoreError('Say what went wrong with the cheque.');
   return withLog(putCheque(store, { ...cheque, status: 'spoiled', statusNote }), ctx, 'Marked spoiled', `${describeCheque(cheque)} — ${statusNote}`, id);
+}
+
+/**
+ * Restoring a backup must never make a used cheque printable again. Every
+ * cheque printed or spoiled in the current data keeps that status in the
+ * restored data, whether or not the backup knew about it.
+ */
+export function reconcileRestore(current: Store, restored: Store): Store {
+  const used = current.cheques.filter((c) => c.status === 'printed' || c.status === 'spoiled');
+  const usedById = new Map(used.map((c) => [c.id, c]));
+  const restoredIds = new Set(restored.cheques.map((c) => c.id));
+  return {
+    ...restored,
+    cheques: [
+      ...restored.cheques.map((c) => (c.status === 'pending' || c.status === 'cancelled' ? usedById.get(c.id) ?? c : c)),
+      ...used.filter((c) => !restoredIds.has(c.id)),
+    ],
+  };
 }
 
 /** Undo "printed" when the leaf was never actually used. */

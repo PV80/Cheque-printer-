@@ -63,7 +63,8 @@ export interface CompanyProfile {
   printerOffsetX: number; // mm
   printerOffsetY: number; // mm
   template: ChequeTemplate;
-  signatureZone: SignatureZone | null;
+  /** One signature box per kind of requisition form this company uses. */
+  signatureZones: Partial<Record<DocumentType, SignatureZone>>;
   loadingNote: string; // shown to whoever loads the cheques, e.g. "Face up, top edge first"
 }
 
@@ -96,6 +97,8 @@ export interface Requisition {
   amountWordsRaw: string;
   wordsCents: number | null; // amount the words spell out, null if absent/unreadable
   chequeNumber: string;
+  /** Doubts raised while reading the PDF that a person must clear. */
+  reviewNotes: string[];
   signature: SignatureResult;
 }
 
@@ -103,6 +106,8 @@ export type OverrideKind = 'unsigned' | 'duplicate_payment';
 
 export interface Override {
   kind: OverrideKind;
+  /** For 'unsigned': exactly which requisitions the approver released. */
+  requisitionIds?: string[];
   byUserId: string;
   byName: string;
   requestedByName: string;

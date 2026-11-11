@@ -16,12 +16,13 @@ import type {
 // Paths
 // ---------------------------------------------------------------------------
 
-const DEV_URL = process.env.CHEQUE_PRINTER_DEV_URL ?? '';
+// Development and test switches. None of them work in the installed app.
+const DEV_URL = app.isPackaged ? '' : process.env.CHEQUE_PRINTER_DEV_URL ?? '';
 const RENDERER_DIR = path.join(__dirname, '..', 'dist');
 
 // Tests point the app at a throwaway folder; normal use keeps data in the
 // per-user application data folder.
-if (process.env.CHEQUE_PRINTER_DATA_DIR) {
+if (process.env.CHEQUE_PRINTER_DATA_DIR && !app.isPackaged) {
   app.setPath('userData', process.env.CHEQUE_PRINTER_DATA_DIR);
 }
 
@@ -171,8 +172,22 @@ async function writeStore(json: string): Promise<void> {
   }
 
   if (existsSync(dataFile())) {
-    await writeDailyBackup();
-    await retryBusy(() => fs.copyFile(dataFile(), backupFile()));
+    // Only a readable data file may replace the spare copy, and a problem
+    // with the backups must never stop the save itself.
+    let readable = false;
+    try {
+      readable = parsesAsStore(await fs.readFile(dataFile(), 'utf8'));
+    } catch {
+      readable = false;
+    }
+    if (readable) {
+      try {
+        await writeDailyBackup();
+        await retryBusy(() => fs.copyFile(dataFile(), backupFile()));
+      } catch (err) {
+        console.error('Backup step failed', err);
+      }
+    }
   }
   await retryBusy(() => fs.rename(tmp, dataFile()));
 }

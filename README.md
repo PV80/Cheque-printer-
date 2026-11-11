@@ -20,11 +20,16 @@ print one company at a time with a prompt that says exactly which leaves to load
 
 1. **Create the administrator account** on first launch. There is no password reset by email;
    create a second administrator as a spare (Setup → People).
-2. **Add each company** (Setup → Companies), named exactly as it appears at the top of its
-   requisitions. Add other spellings if the form varies.
-3. **Set the signature box** for each company: open a sample requisition, drag a box around
-   the empty space where the approver signs. Then try an unsigned copy — it must read
-   *Not signed* — and a signed copy — it must read *Signed*.
+2. **Add each company** (Setup → Companies) — one per cheque book. A typed *Cheque Requisition
+   Voucher* is matched by the name at its top. An accounts-system *Payment Receipt* is matched
+   by its "Bank:" line, because that names the account the cheque is drawn on. The first time
+   a new name or bank account appears the requisition is held; choose its company once and
+   the app remembers.
+3. **Set the signature box** for each company and each kind of form it uses (the voucher and
+   the receipt are signed in different places). Open a sample, drag a box around where the
+   approver signs — the typed name and the underline may be inside it, they are ignored. Then
+   try an unsigned copy: it must read *Not signed*. A box already set for the same form at
+   another company is offered as a starting point.
 4. **Check the cheque layout** for each company. Positions start from an estimate, so:
    print a test on plain paper → hold it against a real cheque up to the light → nudge the
    fields → repeat until it lines up → Save. For a second company whose cheque is nearly the
@@ -62,10 +67,21 @@ types their own username, password and a reason in the override window. Both nam
 - A requisition reaches the queue only when its signature box contains a signature-sized mark,
   or a supervisor has overridden with a reason.
 - The amount in words on the requisition must agree with the figures, or it is held.
+- Only the first page is read. Supporting pages (invoices, schedules) never supply a payee,
+  amount or date. A PDF holding two requisitions is refused: save each as its own file.
+- Dates written with numbers only (10/11/2026) are accepted when they can mean one thing:
+  one reading is impossible (10/13/2026), or one reading is within days of when the PDF was
+  made and the other is weeks away. Otherwise the requisition is held for someone to enter
+  the date. The accounts system has printed both month-first and day-first dates.
+- Anything the reader is unsure of — an amount in an unusual format, two different amounts or
+  cheque numbers, a payee that may run on to a second line — holds the requisition until a
+  supervisor has checked the details.
 - A cheque number that has been printed or spoiled is never printed again for that company.
 - The same PDF is never loaded twice.
 - Two requisitions with the same cheque number are both held until someone either combines
   them into one cheque (same payee, amounts added) or discards one (a corrected requisition).
+  An override given for one requisition never covers another combined with it later.
+- Restoring a backup never makes a cheque that was printed or spoiled printable again.
 - Same payee + amount + date on a new cheque number is held as a possible double payment —
   unless the earlier cheque was marked spoiled, which is the normal re-issue case.
 - Text that would not fit is shrunk; if it still cannot fit, the cheque is held rather than

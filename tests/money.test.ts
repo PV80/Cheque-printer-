@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { amountToWords, formatFigures, formatMoney, parseAmountToCents, wordsToCents } from '../src/core/amount';
-import { dateWarning, findDateInText, formatDate, formatTimestamp, formatTimestampDate, isValidIsoDate, parseDate } from '../src/core/dates';
+import { dateWarning, findDateInText, formatDate, formatTimestamp, formatTimestampDate, isValidIsoDate, parseDate, readDate } from '../src/core/dates';
 
 describe('amountToWords', () => {
   it.each([
@@ -91,7 +91,7 @@ describe('wordsToCents', () => {
     expect(wordsToCents(text)).toBe(cents);
   });
 
-  it.each(['', 'Fifteen thousand banana', '15,000', 'only'])('cannot read %j', (text) => {
+  it.each(['', 'Fifteen thousand banana', '15,000', 'only', 'Fifty Eight Thousand and 50/100 Only'])('cannot read %j', (text) => {
     expect(wordsToCents(text)).toBeNull();
   });
 
@@ -138,6 +138,28 @@ describe('dates', () => {
     expect(isValidIsoDate('2026-06-05')).toBe(true);
     expect(isValidIsoDate('2026-6-5')).toBe(false);
     expect(isValidIsoDate('2026-02-30')).toBe(false);
+  });
+
+  it('never reads a date out of the middle of another one', () => {
+    expect(findDateInText('2026/06/25')).toBe('2026/06/25');
+    expect(findDateInText('2026.06.05 ref')).toBe('2026.06.05');
+    expect(parseDate('2026/06/25')).toBe('2026-06-25');
+    expect(findDateInText('BILL/2026/10/0020')).toBeNull();
+    expect(findDateInText('1/2/20261')).toBeNull();
+  });
+
+  it('reads an all-number date only when it can mean one thing', () => {
+    expect(readDate('13/10/2026', undefined)).toEqual({ iso: '2026-10-13', note: '' });
+    expect(readDate('10/13/2026', undefined)).toEqual({ iso: '2026-10-13', note: '' });
+    expect(readDate('05/05/2026', undefined)).toEqual({ iso: '2026-05-05', note: '' });
+    expect(readDate('5 June 2026', undefined)).toEqual({ iso: '2026-06-05', note: '' });
+    expect(readDate('10/11/2026', '2026-11-10').iso).toBe('2026-11-10');
+    expect(readDate('10/11/2026', '2026-11-12').iso).toBe('2026-11-10');
+    expect(readDate('10/11/2026', '2026-10-11').iso).toBe('2026-10-11');
+    expect(readDate('10/11/2026', undefined).iso).toBe('');
+    expect(readDate('10/11/2026', '2026-10-26').iso).toBe(''); // about as far from both
+    expect(readDate('10/11/2026', '2026-12-25').iso).toBe(''); // near neither
+    expect(readDate('31/02/2026', '2026-02-28')).toEqual({ iso: '', note: 'The date "31/02/2026" is not a real date.' });
   });
 
   it('finds a date inside other text', () => {

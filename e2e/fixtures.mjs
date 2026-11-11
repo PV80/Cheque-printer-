@@ -7,6 +7,14 @@ import { PDFDocument, PDFName, rgb, StandardFonts } from 'pdf-lib';
 
 export const PAGE = { w: 595, h: 842 }; // A4 in points
 
+// Every sample says it was produced on 5 June 2026. The app uses that day to
+// tell whether 05/06/2026 is day-first or month-first.
+const PRODUCED = new Date(Date.UTC(2026, 5, 5, 9, 0, 0));
+function stamp(doc) {
+  doc.setCreationDate(PRODUCED);
+  doc.setModificationDate(PRODUCED);
+}
+
 // Where the approver signs, in PDF points (origin bottom-left).
 const SIGN_AREA = { x: 395, y: 188, w: 160, h: 58 };
 
@@ -161,6 +169,72 @@ export async function makeRequisitionPdf(o) {
     page.node.set(PDFName.of('Annots'), doc.context.obj([annotation]));
   }
 
+  stamp(doc);
+  return doc.save();
+}
+
+// ---- The accounts-system payment receipt (US letter) -------------------------------
+
+const LETTER = { w: 612, h: 792 };
+const RECEIPT_SIGN_AREA = { x: 104, y: 254, w: 232, h: 38 };
+
+/** Where the approver signs on the receipt, as page fractions from the top-left. */
+export const RECEIPT_SIGNATURE_BOX = {
+  x: RECEIPT_SIGN_AREA.x / LETTER.w,
+  y: (LETTER.h - RECEIPT_SIGN_AREA.y - RECEIPT_SIGN_AREA.h) / LETTER.h,
+  w: RECEIPT_SIGN_AREA.w / LETTER.w,
+  h: RECEIPT_SIGN_AREA.h / LETTER.h,
+};
+
+/**
+ * @param {object} o
+ * @param {string} o.bank      the bank account line, e.g. "I&M Bank"
+ * @param {string} o.payee
+ * @param {string} o.date      as the accounts system prints it (it has used both MM/DD and DD/MM)
+ * @param {string} o.amount    e.g. "59,000.00"
+ * @param {string} o.chq       cheque number; printed on its own line, as when the reference wraps
+ * @param {boolean} [o.signed]
+ */
+export async function makeReceiptPdf(o) {
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([LETTER.w, LETTER.h]);
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const bold = await doc.embedFont(StandardFonts.HelveticaBold);
+  const text = (str, x, y, size = 9, f = font, color = rgb(0, 0, 0)) => page.drawText(str, { x, y, size, font: f, color });
+
+  text('Golden Ivy Investments', 380, 740);
+  text('Office 13, Sample Plaza,', 380, 727);
+  text('Nairobi Kenya', 380, 714);
+  text('Payment Receipt: PBNK9/2026/00002', 40, 640, 15, bold);
+  text(`Payment Date: ${o.date}`, 40, 612);
+  text(`Payment Amount: KSh ${o.amount}`, 320, 612);
+  text(`Vendor: ${o.payee}`, 40, 582);
+  text('Payment Method: Checks', 320, 582);
+  text(`Bank: ${o.bank}`, 320, 552);
+
+  text('INVOICE', 40, 500, 8, bold);
+  text('DATE', 40, 490, 8, bold);
+  text('INVOICE NUMBER', 115, 500, 8, bold);
+  text('REFERENCE', 290, 500, 8, bold);
+  text('AMOUNT', 540, 500, 8, bold);
+  text(o.date, 40, 462);
+  text('BILL/2026/06/0020', 115, 462);
+  text('Withdrawal for June 2026 - Cheque No.', 290, 462);
+  text(o.chq, 290, 450); // the number wrapped on to the next line of the cell
+  text(`KSh ${o.amount}`, 520, 462);
+  text('Due Amount for', 115, 425, 9, bold);
+  text('KSh 0.00', 540, 425, 9, bold);
+
+  text('PREPARED BY: ________________________________________', 40, 300, 9, bold);
+  text('APPROVED BY: ________________________________________', 40, 268, 9, bold);
+  text('John Approver', 112, 271, 9, font, rgb(0.1, 0.3, 0.8)); // typed beside the signature
+  if (o.signed) {
+    const png = await doc.embedPng(signaturePng());
+    page.drawImage(png, { x: 205, y: 257, width: 105, height: 31 });
+  }
+  text('+254 700 000000 info@example.com', 40, 60, 8);
+
+  stamp(doc);
   return doc.save();
 }
 
@@ -170,5 +244,6 @@ export async function makeImageOnlyPdf() {
   const page = doc.addPage([PAGE.w, PAGE.h]);
   const png = await doc.embedPng(signaturePng());
   page.drawImage(png, { x: 100, y: 400, width: 300, height: 90 });
+  stamp(doc);
   return doc.save();
 }

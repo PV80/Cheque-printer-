@@ -4,10 +4,12 @@
 import { formatMoney } from './amount';
 import { dateWarning, formatTimestamp, formatTimestampDate, isValidIsoDate } from './dates';
 import { chequeValues, layoutCheque, type Measure } from './layout';
-import type { Cheque, OverrideKind, Store } from './types';
+import { FORM_LABELS } from './company';
+import type { Cheque, OverrideKind, Requisition, Store } from './types';
 
 export type IssueKind =
   | 'print_unconfirmed'
+  | 'needs_review'
   | 'no_company'
   | 'missing_fields'
   | 'amount_mismatch'
@@ -39,10 +41,22 @@ export function hasOverride(cheque: Cheque, kind: OverrideKind): boolean {
   return cheque.overrides.some((o) => o.kind === kind);
 }
 
-/** Every requisition behind the cheque is signed, or an approver has overridden. */
+/**
+ * An approver released this particular requisition without a signature. An
+ * override never stretches to a requisition added to the cheque afterwards.
+ */
+export function isReleased(cheque: Cheque, requisition: Requisition): boolean {
+  return cheque.overrides.some(
+    (o) => o.kind === 'unsigned' && (!o.requisitionIds || o.requisitionIds.includes(requisition.id))
+  );
+}
+
+/** Every requisition behind the cheque is signed, or was released by an approver. */
 export function isSigned(cheque: Cheque): boolean {
-  if (hasOverride(cheque, 'unsigned')) return true;
-  return cheque.requisitions.length > 0 && cheque.requisitions.every((r) => r.signature.status === 'signed');
+  return (
+    cheque.requisitions.length > 0 &&
+    cheque.requisitions.every((r) => r.signature.status === 'signed' || isReleased(cheque, r))
+  );
 }
 
 function numberKey(c: Cheque): string | null {
@@ -101,9 +115,12 @@ export function createIssueChecker(store: Store, measure?: Measure): (cheque: Ch
 
     const missing: string[] = [];
     if (!cheque.payee.trim()) missing.push('payee');
-    if (!isValidIsoDate(cheque.date)) missing.push('date');
+    if (!isValidIsoDate(cheque.date)) {
+      const written = cheque.requisitions[0]?.dateRaw;
+      missing.push(written ? `date (written as ${written})` : 'date');
+    }
     if (!Number.isSafeInteger(cheque.amountCents) || cheque.amountCents <= 0) missing.push('amount');
-    if (!/^\d{1,12}$/.test(cheque.chequeNumber)) missing.push('cheque number');
+    if (!/^\d{1,12}$/.test(cheque.chequeNumber) || normaliseChequeNumber(cheque.chequeNumber) === '') missing.push('cheque number');
     if (missing.length) {
       issues.push({ kind: 'missing_fields', message: `Could not read: ${missing.join(', ')}.` });
     }
@@ -127,9 +144,16 @@ export function createIssueChecker(store: Store, measure?: Measure): (cheque: Ch
       }
     }
 
-    if (company && !hasOverride(cheque, 'unsigned')) {
-      const unsigned = cheque.requisitions.filter((r) => r.signature.status === 'not_signed');
-      const unchecked = cheque.requisitions.filter((r) => r.signature.status === 'unchecked');
+    // Doubts raised while reading the PDF stand until a supervisor has checked the details.
+    if (!cheque.amountConfirmed) {
+      const notes = cheque.requisitions.flatMap((r) => r.reviewNotes ?? []);
+      if (notes.length) issues.push({ kind: 'needs_review', message: notes.join(' ') });
+    }
+
+    if (company) {
+      const open = cheque.requisitions.filter((r) => r.signature.status !== 'signed' && !isReleased(cheque, r));
+      const unsigned = open.filter((r) => r.signature.status === 'not_signed');
+      const noBox = open.find((r) => r.signature.status === 'unchecked' && !company.signatureZones[r.documentType]);
       if (unsigned.length || cheque.requisitions.length === 0) {
         issues.push({
           kind: 'unsigned',
@@ -138,15 +162,13 @@ export function createIssueChecker(store: Store, measure?: Measure): (cheque: Ch
               ? `Not signed: ${unsigned.map((r) => r.filename).join(', ')}.`
               : 'The requisition is not signed.',
         });
-      } else if (unchecked.length) {
-        issues.push(
-          company.signatureZone
-            ? { kind: 'signature_unchecked', message: 'The signature has not been checked yet.' }
-            : {
-                kind: 'signature_zone_missing',
-                message: `The signature box for ${company.name} requisitions has not been set up.`,
-              }
-        );
+      } else if (noBox) {
+        issues.push({
+          kind: 'signature_zone_missing',
+          message: `${company.name} has no signature box set up for this kind of form (${FORM_LABELS[noBox.documentType]}).`,
+        });
+      } else if (open.length) {
+        issues.push({ kind: 'signature_unchecked', message: 'The signature has not been checked yet.' });
       }
     }
 

@@ -161,6 +161,8 @@ function combine(shillingTokens: string[], centTokens: string[]): number | null 
  * Returns null when the text cannot be read with confidence.
  */
 export function wordsToCents(text: string): number | null {
+  // "... and 50/100 Only": figures hidden in the words would be dropped silently.
+  if (/\d/.test(text)) return null;
   const tokens = text
     .toLowerCase()
     .replace(/[-–—/]/g, ' ')

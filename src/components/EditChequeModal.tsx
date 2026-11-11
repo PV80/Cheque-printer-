@@ -24,6 +24,7 @@ export function EditChequeModal({ cheque, onClose }: Props) {
   const cents = parseAmountToCents(amount);
   const iso = parseDate(date);
   const mismatch = issuesOf(cheque).find((i) => i.kind === 'amount_mismatch');
+  const doubts = cheque.amountConfirmed ? [] : cheque.requisitions.flatMap((r) => r.reviewNotes ?? []);
 
   function save() {
     if (!payee.trim()) return setError('Enter the payee.');
@@ -49,6 +50,11 @@ export function EditChequeModal({ cheque, onClose }: Props) {
     >
       <div className="space-y-4">
         {mismatch && <Notice tone="amber">{mismatch.message} Enter the amount that should be paid.</Notice>}
+        {doubts.map((note) => (
+          <Notice key={note} tone="amber">
+            {note}
+          </Notice>
+        ))}
 
         <div className="grid grid-cols-2 gap-3">
           <Field label="Cheque number" value={chequeNumber} onChange={(e) => setChequeNumber(e.target.value)} inputMode="numeric" />

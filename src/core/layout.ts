@@ -148,7 +148,23 @@ export function layoutCheque(
   const t = company.template;
   const originX = company.printerOffsetX;
   const originY = company.printerOffsetY + t.pageTopOffset;
-  const fields = FIELD_KEYS.map((key) => placeField(key, values[key].trim(), t.fields[key], originX, originY, measure));
+  const page = pageSizeMm(t);
+  const fields = FIELD_KEYS.map((key) => {
+    const field = placeField(key, values[key].trim(), t.fields[key], originX, originY, measure);
+    // Any text hanging over the edge of the leaf would be cut off by the printer.
+    const offPage = field.lines.some((line) => {
+      const textWidth = measure(line.text, field.fontPt, field.fontFamily, field.fontWeight);
+      const slack = field.widthMm - textWidth;
+      const left = line.xMm + (field.align === 'right' ? slack : field.align === 'center' ? slack / 2 : 0);
+      return (
+        left < -0.01 ||
+        left + textWidth > page.widthMm + 0.01 ||
+        line.yMm < -0.01 ||
+        line.yMm + field.lineHeightMm > page.heightMm + 0.01
+      );
+    });
+    return offPage ? { ...field, overflow: true } : field;
+  });
   return { fields, overflow: fields.filter((f) => f.overflow).map((f) => f.key) };
 }
 

@@ -31,6 +31,9 @@ export interface InkAnalysis {
 /** A mark must be at least this big to count as a signature. */
 export const SIGNATURE_MINIMUM = { inkMm2: 3, widthMm: 6, heightMm: 2.5 };
 
+/** Straight runs at least this long (mm) are treated as printed lines, not ink. */
+const STRAIGHT_RUN_MM = { horizontal: 5, vertical: 4 };
+
 const INK_CONTRAST = 48; // how far a pixel must be from the background colour (0-255)
 
 function medianOfHistogram(hist: Uint32Array, total: number): number {
@@ -77,9 +80,10 @@ export function analyseSignatureZone(zone: ZonePixels): InkAnalysis {
     for (let y = y0; y < y1; y++) ink.fill(0, y * width + x0, y * width + Math.max(x0, x1));
   }
 
-  // 4. Ignore ruled lines and box borders: long, perfectly straight runs.
-  const minHorizontal = Math.min(width, Math.max(0.3 * width, 15 * pxPerMm));
-  const minVertical = Math.min(height, Math.max(0.6 * height, 8 * pxPerMm));
+  // 4. Ignore ruled lines, underlines and box or table borders: perfectly
+  //    straight runs. Handwriting is never this straight for this long.
+  const minHorizontal = STRAIGHT_RUN_MM.horizontal * pxPerMm;
+  const minVertical = STRAIGHT_RUN_MM.vertical * pxPerMm;
   const erase = new Uint8Array(total);
 
   for (let y = 0; y < height; y++) {
@@ -121,22 +125,18 @@ export function analyseSignatureZone(zone: ZonePixels): InkAnalysis {
   }
   if (count === 0) return none;
 
-  const span = (counts: Uint32Array): number => {
-    let first = -1;
-    let last = -1;
-    for (let i = 0; i < counts.length; i++) {
-      if (counts[i] >= 2) {
-        if (first === -1) first = i;
-        last = i;
-      }
-    }
-    return first === -1 ? 0 : last - first + 1;
+  // How much of the box is actually written on, counted row by row and column
+  // by column. Two thin marks far apart do not add up to one tall mark.
+  const inked = (counts: Uint32Array, atLeast: number): number => {
+    let n = 0;
+    for (let i = 0; i < counts.length; i++) if (counts[i] >= atLeast) n++;
+    return n;
   };
 
   const round1 = (n: number) => Math.round(n * 10) / 10;
   const inkMm2 = round1(count / (pxPerMm * pxPerMm));
-  const widthMm = round1(span(colInk) / pxPerMm);
-  const heightMm = round1(span(rowInk) / pxPerMm);
+  const widthMm = round1(inked(colInk, 1) / pxPerMm);
+  const heightMm = round1(inked(rowInk, 2) / pxPerMm);
 
   const signed =
     inkMm2 >= SIGNATURE_MINIMUM.inkMm2 &&

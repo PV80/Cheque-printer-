@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Building2, CheckCircle, ChevronRight, Plus, Trash2, X } from 'lucide-react';
+import { FORM_LABELS, FORM_TYPES } from '../core/company';
 import { deleteCompany, newCompany, saveCompany } from '../core/store';
 import type { CompanyProfile } from '../core/types';
 import { api } from '../platform/api';
@@ -65,7 +66,9 @@ export function CompaniesPanel() {
                     {c.printerName || 'printer chosen at print time'}
                   </span>
                 </span>
-                <Badge tone={c.signatureZone ? 'green' : 'amber'}>{c.signatureZone ? 'Signature box set' : 'No signature box'}</Badge>
+                <Badge tone={Object.keys(c.signatureZones).length ? 'green' : 'amber'}>
+                  {Object.keys(c.signatureZones).length ? 'Signature box set' : 'No signature box'}
+                </Badge>
                 <ChevronRight size={16} className="text-gray-400" />
               </button>
             </li>
@@ -183,18 +186,22 @@ function CompanyEditor({ company, onBack }: { company: CompanyProfile; onBack: (
         <section className="bg-white border border-gray-200 rounded-xl p-5 space-y-3 self-start">
           <h3 className="font-semibold text-gray-800 text-sm">Signature box</h3>
           <p className="text-sm text-gray-600">
-            Where the approver signs on this company's requisition form. A requisition only reaches the print queue when
-            something signature-sized has been written or placed in this box.
+            Where the approver signs. Each kind of form has its own box, because the signature sits in a different place
+            on each. A requisition only reaches the print queue when something signature-sized is in its box.
           </p>
-          {company.signatureZone ? (
-            <p className="flex items-center gap-2 text-sm text-green-700">
-              <CheckCircle size={16} /> Set on page {company.signatureZone.page}
-            </p>
-          ) : (
-            <p className="text-sm text-amber-700">Not set — every requisition for this company will be held.</p>
-          )}
+          <ul className="space-y-1.5" data-testid="zone-list">
+            {FORM_TYPES.filter((t) => t !== 'unknown' || company.signatureZones.unknown).map((type) => {
+              const zone = company.signatureZones[type];
+              return (
+                <li key={type} data-form={type} data-set={zone ? 'yes' : 'no'} className={`flex items-center gap-2 text-sm ${zone ? 'text-green-700' : 'text-amber-700'}`}>
+                  {zone ? <CheckCircle size={15} /> : <span className="w-[15px] text-center">–</span>}
+                  {FORM_LABELS[type]}: {zone ? `set (page ${zone.page})` : 'not set — these will be held'}
+                </li>
+              );
+            })}
+          </ul>
           <Button onClick={() => setZoneOpen(true)} data-testid="open-zone">
-            {company.signatureZone ? 'View or change…' : 'Set signature box…'}
+            Open a sample to set or change a box…
           </Button>
           <p className="text-xs text-gray-400">
             The check only confirms that a mark is present. It does not recognise whose signature it is.

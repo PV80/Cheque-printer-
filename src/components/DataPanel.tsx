@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Download, FolderOpen, Upload } from 'lucide-react';
 import { todayIso } from '../core/dates';
-import { importCompanyLayouts, logEvent, parseStore, serializeStore, StoreError, updateSettings } from '../core/store';
+import { importCompanyLayouts, logEvent, parseStore, reconcileRestore, serializeStore, StoreError, updateSettings } from '../core/store';
 import { api } from '../platform/api';
 import { useApp } from '../state/AppContext';
 import { Button, Notice } from './ui';
@@ -61,10 +61,10 @@ export function DataPanel() {
       const message =
         `Replace ALL current data with ${file.name}?\n\n` +
         `It holds ${restored.cheques.length} cheque records, ${restored.companies.length} companies and ${restored.users.length} users.\n` +
-        'Everything entered since that backup was made will be lost, and everyone will be signed out.';
+        'Everything entered since that backup was made will be lost, except that cheques already printed or spoiled stay recorded. Everyone will be signed out.';
       if (!window.confirm(message)) return;
       const ctx = { actor: user, now: new Date().toISOString(), newId: () => crypto.randomUUID() };
-      replaceStore(logEvent(restored, ctx, 'Restored backup', file.name));
+      replaceStore(logEvent(reconcileRestore(store, restored), ctx, 'Restored backup', file.name));
       signOut();
     } catch (err) {
       notify('error', err instanceof StoreError ? err.message : 'That file could not be read.');

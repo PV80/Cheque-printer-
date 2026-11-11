@@ -62,6 +62,21 @@ describe('layoutCheque', () => {
     expect(layout.overflow).toEqual(['payee']);
   });
 
+  it('flags text that would hang over the edge of the cheque', () => {
+    const nudged = makeCompany('Z Ltd', { printerOffsetX: 5 });
+    expect(layoutCheque(values, nudged, fakeMeasure).overflow).toEqual([]); // the text itself still fits
+
+    const pushedRight = makeCompany('A Ltd', { printerOffsetX: 60 });
+    expect(layoutCheque(values, pushedRight, fakeMeasure).overflow).toEqual(['date', 'amountFigures']);
+
+    const pushedLeft = makeCompany('B Ltd', { printerOffsetX: -30 });
+    expect(layoutCheque(values, pushedLeft, fakeMeasure).overflow).toContain('payee');
+
+    const tooLow = makeCompany('C Ltd');
+    tooLow.template.fields.amountWords.y = 84;
+    expect(layoutCheque(values, tooLow, fakeMeasure).overflow).toEqual(['amountWords']);
+  });
+
   it('wraps amount words on to the second ruled line', () => {
     const company = makeCompany('A Ltd');
     const v = chequeValues({ date: '2026-06-05', payee: 'X', amountCents: 123_456_789_012 });

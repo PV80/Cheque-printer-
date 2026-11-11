@@ -85,7 +85,50 @@ export async function renderPage(pdf: PdfDocument, pageNumber: number, wantedSca
   return { canvas, scale };
 }
 
+/** The day the PDF was last saved, as ISO, from its own properties. */
+export async function producedOn(pdf: PdfDocument): Promise<string | undefined> {
+  try {
+    const { info } = (await pdf.getMetadata()) as { info: { ModDate?: string; CreationDate?: string } };
+    const stamp = (info.ModDate || info.CreationDate || '').match(/^D:(\d{4})(\d{2})(\d{2})/);
+    return stamp ? `${stamp[1]}-${stamp[2]}-${stamp[3]}` : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 const NOT_SIGNED: InkAnalysis = { signed: false, inkMm2: 0, widthMm: 0, heightMm: 0 };
+
+// Underlines are often typed: "APPROVED BY: ____________". The words must be
+// hidden completely, but the line only as a hairline, because the signature is
+// written right across it.
+const RULE_RUN = /([_.\-–—=]{4,})/;
+const RULE_ONLY = /^[\s_.\-–—=]+$/;
+let ruler: CanvasRenderingContext2D | null = null;
+
+function textMasks(t: PositionedText, pad: number): Rect[] {
+  const words = (x0: number, w: number): Rect => ({ x: x0 - pad, y: t.y - t.height - pad, w: w + 2 * pad, h: t.height * 1.35 + 2 * pad });
+  const rule = (x0: number, w: number, dashes: boolean): Rect =>
+    dashes
+      ? { x: x0 - pad, y: t.y - 0.6 * t.height, w: w + 2 * pad, h: 0.6 * t.height } // "-----" sits mid-line
+      : { x: x0 - pad, y: t.y - 0.2 * t.height, w: w + 2 * pad, h: 0.55 * t.height }; // "_____" sits on the baseline
+  if (!RULE_RUN.test(t.str)) return [words(t.x, t.scaledWidth)];
+
+  // Share the run's width between its words and its lines in proportion.
+  ruler ??= document.createElement('canvas').getContext('2d');
+  if (ruler) ruler.font = '10px Arial, Helvetica, sans-serif';
+  const parts = t.str.split(RULE_RUN).filter((part) => part !== '');
+  const widths = parts.map((part) => (ruler ? ruler.measureText(part).width : part.length));
+  const total = widths.reduce((a, b) => a + b, 0) || 1;
+
+  const rects: Rect[] = [];
+  let left = t.x;
+  parts.forEach((part, i) => {
+    const w = (widths[i] / total) * t.scaledWidth;
+    if (part.trim() !== '') rects.push(RULE_ONLY.test(part) ? rule(left, w, /[\-–—=]/.test(part)) : words(left, w));
+    left += w;
+  });
+  return rects;
+}
 
 /** Looks inside the signature box of a requisition for a signature-sized mark. */
 export async function checkSignature(pdf: PdfDocument, zone: SignatureZone): Promise<InkAnalysis> {
@@ -106,12 +149,17 @@ export async function checkSignature(pdf: PdfDocument, zone: SignatureZone): Pro
     const pad = 0.6 * POINTS_PER_MM * scale;
     maskRects = (await pageText(page, scale))
       .filter((t) => t.str.trim() !== '')
-      .map((t) => ({
-        x: t.x - pad - x,
-        y: t.y - t.height - pad - y,
-        w: t.scaledWidth + 2 * pad,
-        h: t.height * 1.35 + 2 * pad,
-      }));
+      .flatMap((t) => textMasks(t, pad))
+      .map((r) => ({ ...r, x: r.x - x, y: r.y - y }));
+
+    // Text typed into the PDF afterwards (a text box or form field) is not a signature either.
+    const viewport = page.getViewport({ scale });
+    for (const a of await page.getAnnotations()) {
+      const typed = a.subtype === 'FreeText' || (a.subtype === 'Widget' && a.fieldType === 'Tx');
+      if (!typed || !Array.isArray(a.rect)) continue;
+      const [x1, y1, x2, y2] = viewport.convertToViewportRectangle(a.rect);
+      maskRects.push({ x: Math.min(x1, x2) - x, y: Math.min(y1, y2) - y, w: Math.abs(x2 - x1), h: Math.abs(y2 - y1) });
+    }
   }
 
   return analyseSignatureZone({ data: pixels.data, width, height, pxPerMm: POINTS_PER_MM * scale, maskRects });

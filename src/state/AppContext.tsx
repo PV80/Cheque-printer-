@@ -59,6 +59,9 @@ interface AppContextValue {
   notify: (kind: Toast['kind'], text: string) => void;
   dismissToast: (id: number) => void;
   saveError: string | null;
+  /** The newest save was unreadable at start-up and the previous copy was loaded instead. */
+  recovered: boolean;
+  dismissRecovered: () => void;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
@@ -74,6 +77,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [imports, setImports] = useState<ImportRow[]>([]);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [recovered, setRecovered] = useState(false);
 
   // The latest data and user, readable from callbacks that outlive a render.
   const storeRef = useRef(store);
@@ -119,8 +123,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
         saving.current.next = null;
       }
       saving.current.busy = false;
+      // A failed save is tried again shortly, not left until the next change.
+      if (saving.current.failed) window.setTimeout(() => persistRef.current(storeRef.current), 5000);
     })();
   }, []);
+  const persistRef = useRef(persist);
+  persistRef.current = persist;
 
   /** Resolves once everything so far is on disk. False if the last save failed. */
   const flushSaves = useCallback(async (): Promise<boolean> => {
@@ -155,9 +163,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         storeRef.current = initial;
         setStore(initial);
         setBoot({ phase: 'ready' });
-        if (loaded.status === 'ok' && loaded.recovered) {
-          notify('info', 'The last save did not finish, so the previous saved copy was loaded. Check your latest entries.');
-        }
+        if (loaded.status === 'ok' && loaded.recovered) setRecovered(true);
       } catch (err) {
         if (cancelled) return;
         setBoot({ phase: 'failed', message: err instanceof Error ? err.message : 'The data could not be loaded.' });
@@ -235,12 +241,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
     for (const cheque of store.cheques) {
       if (cheque.status !== 'pending' || !cheque.companyId) continue;
       const companyId = cheque.companyId;
-      const zone = store.companies.find((c) => c.id === companyId)?.signatureZone;
-      if (!zone) continue;
-      const zoneKey = JSON.stringify(zone);
+      const zones = store.companies.find((c) => c.id === companyId)?.signatureZones;
+      if (!zones) continue;
 
       for (const req of cheque.requisitions) {
-        if (req.signature.status !== 'unchecked') continue;
+        const zone = zones[req.documentType];
+        if (req.signature.status !== 'unchecked' || !zone) continue;
+        const zoneKey = JSON.stringify(zone);
         const key = `${req.id}|${zoneKey}`;
         if (checking.current.has(key)) continue;
         checking.current.add(key);
@@ -252,7 +259,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
             const pdf = await openPdf(bytes);
             try {
               const result = await signatureResult(pdf, zone);
-              const current = storeRef.current.companies.find((c) => c.id === companyId)?.signatureZone;
+              const current = storeRef.current.companies.find((c) => c.id === companyId)?.signatureZones[req.documentType];
               if (JSON.stringify(current) === zoneKey) {
                 commit(setSignatureResult(storeRef.current, cheque.id, req.id, result));
               }
@@ -347,6 +354,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     notify,
     dismissToast,
     saveError,
+    recovered,
+    dismissRecovered: () => setRecovered(false),
   };
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

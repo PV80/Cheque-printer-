@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Layers, Trash2 } from 'lucide-react';
 import { formatMoney } from '../core/amount';
 import { formatDate } from '../core/dates';
@@ -43,6 +44,9 @@ export function ResolveDuplicateModal({ cheque, other, onClose }: Props) {
   const [first, second] = cheque.createdAt <= other.createdAt ? [cheque, other] : [other, cheque];
   const samePayee = !!normalisePayee(first.payee) && normalisePayee(first.payee) === normalisePayee(second.payee);
   const total = first.amountCents + second.amountCents;
+  // Identical payee, amount and date usually means one requisition saved twice.
+  const lookIdentical = samePayee && first.amountCents === second.amountCents && first.date === second.date;
+  const [separate, setSeparate] = useState(false);
 
   const combine = () => run((s, ctx) => combineCheques(s, ctx, first.id, second.id)) && onClose();
   const keep = (winner: Cheque, loser: Cheque) =>
@@ -64,7 +68,19 @@ export function ResolveDuplicateModal({ cheque, other, onClose }: Props) {
                 One cheque to <strong>{first.payee}</strong> for {formatMoney(first.amountCents)} + {formatMoney(second.amountCents)} ={' '}
                 <strong className="font-mono">KES {formatMoney(total)}</strong>.
               </p>
-              <Button variant="primary" className="mt-3" onClick={combine} data-testid="combine">
+              {lookIdentical && (
+                <div className="mt-3 space-y-2">
+                  <Notice tone="red">
+                    These two have the same payee, amount and date. If they are the same requisition saved twice, combining
+                    would pay it twice — keep one instead.
+                  </Notice>
+                  <label className="flex items-center gap-2 text-sm text-gray-800">
+                    <input type="checkbox" checked={separate} onChange={(e) => setSeparate(e.target.checked)} data-testid="confirm-separate" />
+                    They are two separate payments that happen to match.
+                  </label>
+                </div>
+              )}
+              <Button variant="primary" className="mt-3" onClick={combine} disabled={lookIdentical && !separate} data-testid="combine">
                 <Layers size={14} /> Combine into one cheque for {formatMoney(total)}
               </Button>
             </>

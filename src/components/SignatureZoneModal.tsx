@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState, type MouseEvent } from 'react';
 import { CheckCircle, FileUp, XCircle } from 'lucide-react';
+import { FORM_LABELS } from '../core/company';
+import { parseRequisition } from '../core/parser';
 import { SIGNATURE_MINIMUM, type InkAnalysis } from '../core/signature';
 import { saveCompany } from '../core/store';
-import type { SignatureZone } from '../core/types';
+import type { DocumentType, SignatureZone } from '../core/types';
 import { api } from '../platform/api';
-import { checkSignature, looksLikePdf, openPdf, renderPage, type PdfDocument } from '../platform/pdf';
+import { checkSignature, extractPages, looksLikePdf, openPdf, renderPage, type PdfDocument } from '../platform/pdf';
 import { useApp } from '../state/AppContext';
 import { Button, Modal, Notice } from './ui';
 
@@ -31,14 +33,18 @@ const MIN_BOX = 0.015;
 export function SignatureZoneModal({ companyId, fileHash, onClose }: Props) {
   const { store, run, notify } = useApp();
   const company = store.companies.find((c) => c.id === companyId);
-  const saved = company?.signatureZone ?? null;
 
   const [pdf, setPdf] = useState<PdfDocument | null>(null);
   const [sampleName, setSampleName] = useState('');
-  const [pageNumber, setPageNumber] = useState(saved?.page ?? 1);
+  const [pageNumber, setPageNumber] = useState(1);
   const [image, setImage] = useState('');
-  const [box, setBox] = useState<Box | null>(saved ? { x: saved.x, y: saved.y, w: saved.w, h: saved.h } : null);
-  const [ignoreTypedText, setIgnoreTypedText] = useState(saved?.ignoreTypedText ?? true);
+  const [box, setBox] = useState<Box | null>(null);
+  // A company can use more than one kind of form, signed in different places:
+  // the box is kept per kind, worked out from the sample that is open.
+  const [formType, setFormType] = useState<DocumentType | null>(null);
+  const [borrowed, setBorrowed] = useState(false);
+  const formTypeRef = useRef<DocumentType | null>(null);
+  const [ignoreTypedText, setIgnoreTypedText] = useState(true);
   const [verdict, setVerdict] = useState<InkAnalysis | null>(null);
   const [error, setError] = useState('');
   const dragStart = useRef<{ x: number; y: number } | null>(null);
@@ -50,10 +56,25 @@ export function SignatureZoneModal({ companyId, fileHash, onClose }: Props) {
     if (!looksLikePdf(bytes)) return setError('That file is not a PDF.');
     try {
       const doc = await openPdf(bytes);
+      const type = parseRequisition(await extractPages(doc)).documentType;
+      if (type !== formTypeRef.current) {
+        // A different kind of form: start from the box saved for it, or one
+        // another company already uses for the same form, as a suggestion.
+        const own = company?.signatureZones[type];
+        const other = own ? undefined : store.companies.map((c) => c.signatureZones[type]).find((z) => !!z);
+        const zone = own ?? other;
+        formTypeRef.current = type;
+        setFormType(type);
+        setBorrowed(!own && !!other);
+        setBox(zone ? { x: zone.x, y: zone.y, w: zone.w, h: zone.h } : null);
+        setIgnoreTypedText(zone?.ignoreTypedText ?? true);
+        setPageNumber(Math.min(Math.max(1, zone?.page ?? 1), doc.numPages));
+      } else {
+        setPageNumber((p: number) => Math.min(Math.max(1, p), doc.numPages));
+      }
       setVerdict(null);
       setPdf(doc); // the previous sample is released by the effect below
       setSampleName(name);
-      setPageNumber((p) => Math.min(Math.max(1, p), doc.numPages));
     } catch {
       setError('Could not open that PDF.');
     }
@@ -111,6 +132,7 @@ export function SignatureZoneModal({ companyId, fileHash, onClose }: Props) {
     e.preventDefault();
     dragStart.current = pointer(e);
     setVerdict(null);
+    setBorrowed(false);
     setBox({ ...dragStart.current, w: 0, h: 0 });
   }
 
@@ -128,10 +150,14 @@ export function SignatureZoneModal({ companyId, fileHash, onClose }: Props) {
   }
 
   function save() {
-    if (!company || !box) return;
-    const signatureZone: SignatureZone = { page: pageNumber, ...box, ignoreTypedText };
-    if (run((s, ctx) => saveCompany(s, ctx, { ...company, signatureZone }))) {
-      notify('success', `Signature box saved for ${company.name}. Waiting requisitions are being re-checked.`);
+    if (!company || !box || !formType) return;
+    const zone: SignatureZone = { page: pageNumber, ...box, ignoreTypedText };
+    const ok = run((s, ctx) => {
+      const latest = s.companies.find((c) => c.id === company.id);
+      return latest ? saveCompany(s, ctx, { ...latest, signatureZones: { ...latest.signatureZones, [formType]: zone } }) : s;
+    });
+    if (ok) {
+      notify('success', `Signature box saved for ${company.name} — ${FORM_LABELS[formType]}. Waiting requisitions are being re-checked.`);
       onClose();
     }
   }
@@ -146,7 +172,7 @@ export function SignatureZoneModal({ companyId, fileHash, onClose }: Props) {
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" onClick={save} disabled={!box || !pdf} data-testid="zone-save">
+          <Button variant="primary" onClick={save} disabled={!box || !pdf || !formType} data-testid="zone-save">
             Save signature box
           </Button>
         </>
@@ -176,6 +202,11 @@ export function SignatureZoneModal({ companyId, fileHash, onClose }: Props) {
             }}
           />
           {pdf && <span className="text-xs text-gray-500">Showing {sampleName}</span>}
+          {pdf && formType && (
+            <span className="text-xs font-medium text-ncba-dark bg-ncba-light rounded-full px-2.5 py-1" data-testid="zone-form" data-form={formType}>
+              {FORM_LABELS[formType]}
+            </span>
+          )}
           {pdf && pdf.numPages > 1 && (
             <label className="text-xs text-gray-600 flex items-center gap-2">
               Page
@@ -202,6 +233,12 @@ export function SignatureZoneModal({ companyId, fileHash, onClose }: Props) {
         </div>
 
         {error && <Notice tone="red">{error}</Notice>}
+        {borrowed && box && (
+          <Notice tone="amber">
+            This box is copied from another company that uses the same form. Check it sits on the signature here, adjust if
+            needed, then save.
+          </Notice>
+        )}
 
         {/* Always present once a sample is open, so the page never jumps while a box is being dragged. */}
         {pdf && (
@@ -259,7 +296,7 @@ export function SignatureZoneModal({ companyId, fileHash, onClose }: Props) {
           </div>
         ) : (
           <div className="border border-dashed border-gray-300 rounded-lg py-16 text-center text-sm text-gray-400">
-            {saved ? 'A signature box is already saved. Open a sample PDF to see or change it.' : 'Open a sample requisition to begin.'}
+            Open a sample requisition to begin. Each kind of form this company uses gets its own box.
           </div>
         )}
       </div>

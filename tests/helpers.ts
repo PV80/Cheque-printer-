@@ -29,7 +29,7 @@ export function ctxFor(user: User, now = '2026-06-05T09:00:00.000Z'): Ctx {
 export function makeCompany(name: string, overrides: Partial<CompanyProfile> = {}): CompanyProfile {
   return {
     ...newCompany(nextId(), name),
-    signatureZone: { page: 1, x: 0.5, y: 0.8, w: 0.3, h: 0.08, ignoreTypedText: true },
+    signatureZones: { requisition_voucher: { page: 1, x: 0.5, y: 0.8, w: 0.3, h: 0.08, ignoreTypedText: true } },
     ...overrides,
   };
 }
@@ -52,6 +52,7 @@ export function makeRequisition(overrides: Partial<Requisition> = {}): Requisiti
     amountWordsRaw: 'Fifty Eight Thousand Only',
     wordsCents: 5_800_000,
     chequeNumber: '000123',
+    reviewNotes: [],
     signature: { status: 'signed' },
     ...overrides,
   };

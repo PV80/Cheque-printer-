@@ -22,6 +22,7 @@ import {
   markSentToPrinter,
   markSpoiled,
   parseStore,
+  reconcileRestore,
   recordPrintResults,
   revertPrinted,
   saveCompany,
@@ -110,7 +111,7 @@ describe('issues that hold a cheque', () => {
   });
 
   it('is held when the signature box is not set up, or the check has not run', () => {
-    const noZone = makeCompany('NoZone Ltd', { signatureZone: null });
+    const noZone = makeCompany('NoZone Ltd', { signatureZones: {} });
     const a = makeCheque(noZone, { req: { signature: { status: 'unchecked' } } });
     const b = makeCheque(co, { req: { signature: { status: 'unchecked' } }, chequeNumber: '000200', payee: 'B' });
     const check = createIssueChecker(makeStore([co, noZone], [a, b]));
@@ -122,7 +123,7 @@ describe('issues that hold a cheque', () => {
     const cheque = makeCheque(null, { payee: '', date: '', amountCents: 0, chequeNumber: '' });
     const issues = createIssueChecker(makeStore([co], [cheque]))(cheque);
     expect(kinds(issues)).toEqual(['no_company', 'missing_fields']);
-    expect(issues[1].message).toBe('Could not read: payee, date, amount, cheque number.');
+    expect(issues[1].message).toBe('Could not read: payee, date (written as 05/06/2026), amount, cheque number.');
   });
 
   it('is held when words and figures disagree, until confirmed', () => {
@@ -211,6 +212,38 @@ describe('issues that hold a cheque', () => {
   it('holds a cheque whose text cannot fit', () => {
     const cheque = makeCheque(co, { payee: 'X'.repeat(400) });
     expect(kinds(createIssueChecker(makeStore([co], [cheque]), fakeMeasure)(cheque))).toEqual(['text_too_long']);
+  });
+
+  it('holds a requisition the reader had doubts about until a supervisor checks it', () => {
+    const cheque = makeCheque(co, { req: { reviewNotes: ['The payee may run on to the next line ("Welfare Association").'] } });
+    const store = makeStore([co], [cheque]);
+    const issues = createIssueChecker(store)(cheque);
+    expect(kinds(issues)).toEqual(['needs_review']);
+    expect(issues[0].message).toContain('payee may run on');
+    expect(() => assertPrintable(store, ctxFor(operator), [cheque.id])).toThrow(StoreError);
+
+    const checked = editCheque(store, ctxFor(supervisor), cheque.id, {
+      payee: 'Paul Angalushe Welfare Association',
+      date: cheque.date,
+      amountCents: cheque.amountCents,
+      chequeNumber: cheque.chequeNumber,
+    });
+    expect(createIssueChecker(checked)(checked.cheques[0])).toEqual([]);
+  });
+
+  it('needs a signature box for each kind of form the company uses', () => {
+    const receipt = makeCheque(co, { req: { documentType: 'payment_receipt', signature: { status: 'unchecked' } } });
+    const issues = createIssueChecker(makeStore([co], [receipt]))(receipt);
+    expect(kinds(issues)).toEqual(['signature_zone_missing']);
+    expect(issues[0].message).toContain('Payment receipt');
+  });
+
+  it('does not accept 0 or 000 as a cheque number', () => {
+    const cheque = makeCheque(co, { chequeNumber: '000' });
+    const store = makeStore([co], [cheque]);
+    expect(kinds(createIssueChecker(store)(cheque))).toEqual(['missing_fields']);
+    const edit = { payee: 'A', date: '2026-06-05', amountCents: 100, chequeNumber: '0' };
+    expect(() => editCheque(store, ctxFor(supervisor), cheque.id, edit)).toThrow('cheque number');
   });
 
   it('warns about dates without blocking', () => {
@@ -362,6 +395,27 @@ describe('resolving two requisitions on one cheque number', () => {
     expect(kinds(createIssueChecker(store)(store.cheques[0]))).toEqual(['unsigned']);
   });
 
+  it('an override on one requisition does not cover another combined with it later', () => {
+    const released = makeCheque(co, { req: { signature: { status: 'not_signed' } } });
+    const extra = makeCheque(co, { amountCents: 900_000, req: { signature: { status: 'not_signed' } } });
+    let store = addOverride(makeStore([co], [released, extra]), ctxFor(supervisor), released.id, 'unsigned', 'Approved by phone', 'Operator');
+    store = combineCheques(store, ctxFor(operator), released.id, extra.id);
+    const combined = store.cheques[0];
+    expect(combined.requisitions).toHaveLength(2);
+    expect(isSigned(combined)).toBe(false);
+    expect(kinds(createIssueChecker(store)(combined))).toEqual(['unsigned']);
+    expect(() => assertPrintable(store, ctxFor(operator), [combined.id])).toThrow(StoreError);
+  });
+
+  it('a double-payment release does not survive a change of amount', () => {
+    const first = makeCheque(co, { status: 'printed', chequeNumber: '000100' });
+    const again = makeCheque(co, { chequeNumber: '000101' });
+    let store = addOverride(makeStore([co], [first, again]), ctxFor(supervisor), again.id, 'duplicate_payment', 'Two separate invoices', 'Operator');
+    expect(createIssueChecker(store)(store.cheques[1])).toEqual([]);
+    store = editCheque(store, ctxFor(supervisor), again.id, { payee: again.payee, date: again.date, amountCents: 100, chequeNumber: '000101' });
+    expect(store.cheques[1].overrides).toEqual([]);
+  });
+
   it('refuses to combine different payees', () => {
     const a = makeCheque(co, { payee: 'Paul Angalushe' });
     const b = makeCheque(co, { payee: 'Someone Else' });
@@ -494,7 +548,7 @@ describe('companies', () => {
     const co = makeCompany('Alpha Ltd');
     const waiting = makeCheque(co);
     const printed = makeCheque(co, { status: 'printed', chequeNumber: '000200', payee: 'B' });
-    const moved = { ...co, signatureZone: { ...co.signatureZone!, x: 0.1 } };
+    const moved = { ...co, signatureZones: { requisition_voucher: { ...co.signatureZones.requisition_voucher!, x: 0.1 } } };
     const store = saveCompany(makeStore([co], [waiting, printed]), ctxFor(admin), moved);
     expect(store.cheques[0].requisitions[0].signature.status).toBe('unchecked');
     expect(store.cheques[1].requisitions[0].signature.status).toBe('signed');
@@ -542,6 +596,30 @@ describe('companies', () => {
     expect(alpha.template.fields.payee).toMatchObject({ x: 25, y: 30, fontFamily: 'Courier New' });
     expect(alpha.template.fields.date.x).toBe(148);
     expect(result.store.companies.map((c) => c.name)).toContain('Gamma Ltd');
+  });
+});
+
+describe('restoring a backup', () => {
+  it('never makes a used cheque printable again', () => {
+    const co = makeCompany('Alpha Ltd');
+    const a = makeCheque(co, { chequeNumber: '000001', payee: 'A' });
+    const b = makeCheque(co, { chequeNumber: '000002', payee: 'B' });
+    const backup = makeStore([co], [a, b]); // taken while both were waiting
+
+    const later = makeCheque(co, { chequeNumber: '000003', payee: 'C' });
+    const now = recordPrintResults(makeStore([co], [a, b, later]), ctxFor(operator), [
+      { id: a.id, outcome: 'printed' },
+      { id: b.id, outcome: 'spoiled', note: 'Jam' },
+      { id: later.id, outcome: 'printed' },
+    ]);
+
+    const restored = reconcileRestore(now, backup);
+    expect(restored.cheques.map((c) => [c.chequeNumber, c.status])).toEqual([
+      ['000001', 'printed'],
+      ['000002', 'spoiled'],
+      ['000003', 'printed'],
+    ]);
+    expect(buildQueue(restored, () => true)).toEqual([]);
   });
 });
 
