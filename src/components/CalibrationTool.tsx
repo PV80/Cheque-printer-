@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState, type ChangeEvent, type MouseEvent as ReactMouseEvent } from 'react';
-import { Copy, Info, Printer, RefreshCw, Save, Upload } from 'lucide-react';
-import { buildPrintHtml, DEFAULT_TEMPLATE, FIELD_KEYS, FONT_STACKS, layoutCheque, pageSizeMm, type ChequeValues } from '../core/layout';
+import { useEffect, useId, useRef, useState, type ChangeEvent, type MouseEvent as ReactMouseEvent } from 'react';
+import { AlertTriangle, Copy, Info, Printer, RefreshCw, Save, Upload } from 'lucide-react';
+import { buildPrintHtml, DEFAULT_TEMPLATE, describeOffSheet, FIELD_KEYS, fieldName, FONT_STACKS, layoutCheque, pageSizeMm, type ChequeValues } from '../core/layout';
 import { saveCompany } from '../core/store';
 import type { ChequeTemplate, CompanyProfile, FieldKey, FieldPosition, FontFamily, PrinterType } from '../core/types';
 import { api } from '../platform/api';
@@ -34,31 +34,45 @@ const SCALE = 3.2; // screen pixels per mm
 const PT_TO_MM = 25.4 / 72;
 const FONTS: FontFamily[] = ['Arial', 'Courier New', 'Times New Roman'];
 const round1 = (n: number) => Math.round(n * 10) / 10;
+const UNREACHABLE_FILL = 'repeating-linear-gradient(135deg, rgba(220,38,38,0.30) 0 6px, rgba(220,38,38,0.10) 6px 12px)';
 
 function NumberInput({ label, value, onChange, step = 0.5, hint }: { label: string; value: number; onChange: (n: number) => void; step?: number; hint?: string }) {
+  const id = useId();
+  // While someone is typing, show what they typed: the value itself may sit at a
+  // limit until the number is complete (typing 127 passes through 1 and 12).
+  const [typing, setTyping] = useState<string | null>(null);
+  const nudge = (by: number) => {
+    setTyping(null);
+    onChange(round1(value + by));
+  };
   return (
-    <label className="block">
-      <span className="text-xs text-gray-500">{label}</span>
+    <div>
+      <label htmlFor={id} className="text-xs text-gray-500">
+        {label}
+      </label>
       <div className="flex items-center gap-1 mt-1">
-        <button type="button" onClick={() => onChange(round1(value - step))} className="w-6 h-6 border rounded text-sm hover:bg-gray-100" aria-label={`Decrease ${label}`}>
+        <button type="button" onClick={() => nudge(-step)} className="w-6 h-6 border rounded text-sm hover:bg-gray-100" aria-label={`Decrease ${label}`}>
           −
         </button>
         <input
+          id={id}
           type="number"
           className="w-full min-w-0 border rounded px-1 py-0.5 text-xs text-center"
-          value={value}
+          value={typing ?? value}
           step={step}
           onChange={(e) => {
+            setTyping(e.target.value);
             const n = parseFloat(e.target.value);
             if (Number.isFinite(n)) onChange(n);
           }}
+          onBlur={() => setTyping(null)}
         />
-        <button type="button" onClick={() => onChange(round1(value + step))} className="w-6 h-6 border rounded text-sm hover:bg-gray-100" aria-label={`Increase ${label}`}>
+        <button type="button" onClick={() => nudge(step)} className="w-6 h-6 border rounded text-sm hover:bg-gray-100" aria-label={`Increase ${label}`}>
           +
         </button>
       </div>
       {hint && <span className="block text-xs text-gray-400 leading-tight mt-0.5">{hint}</span>}
-    </label>
+    </div>
   );
 }
 
@@ -172,7 +186,8 @@ export function CalibrationTool({ company }: { company: CompanyProfile }) {
     const html = buildPrintHtml([layout], template, { title: `Test print — ${company.name}`, guides: true });
     try {
       const result = await api.print({ html, ...pageSizeMm(template), deviceName: company.printerName });
-      if (result.ok) notify('success', 'Test page sent. Hold it against a real cheque up to the light to compare.');
+      if (result.ok && offSheet.length) notify('error', `Test page sent, but the ${offSheet.map((o) => fieldName(o.key)).join(' and ')} will be missing from it: see the warning under the cheque.`);
+      else if (result.ok) notify('success', 'Test page sent. Hold it against a real cheque up to the light to compare.');
       else if (result.reason !== 'cancelled') notify('error', `The printer reported a problem: ${result.reason}`);
     } catch (err) {
       notify('error', `Could not print: ${err instanceof Error ? err.message : 'unknown error'}`);
@@ -182,6 +197,40 @@ export function CalibrationTool({ company }: { company: CompanyProfile }) {
   // The on-screen cheque shows positions on the leaf itself, without printer offsets.
   const screenLayout = layoutCheque(SAMPLE, { template: { ...template, pageTopOffset: 0 }, printerOffsetX: 0, printerOffsetY: 0 }, measureText);
   const sel = selected ? template.fields[selected] : null;
+
+  // What the printer would really be sent, with the printer shift applied.
+  const sheet = pageSizeMm(template);
+  const minSheet = template.chequeHeight + template.pageTopOffset;
+  const printLayout = layoutCheque(SAMPLE, draft, measureText);
+  const offSheet = printLayout.fields.flatMap((p) => (p.problem?.kind === 'off_sheet' ? [{ key: p.key, problem: p.problem }] : []));
+
+  // Strips of the cheque that fall outside that sheet: nothing placed there can print.
+  const originY = offsetY + template.pageTopOffset;
+  const within = (n: number, max: number) => Math.min(max, Math.max(0, n));
+  const unreachable = {
+    top: within(-originY, template.chequeHeight),
+    bottom: within(originY + template.chequeHeight - sheet.heightMm, template.chequeHeight),
+    left: within(-offsetX, template.chequeWidth),
+    right: within(offsetX + template.chequeWidth - sheet.widthMm, template.chequeWidth),
+  };
+
+  // A page shorter than the printer's own sheet is centred on it, so a print that
+  // lands N mm low means the sheet is 2N mm longer than the page it was sent.
+  const longerSheet = Math.ceil(sheet.heightMm + 2 * Math.abs(offsetY));
+  const canUseLongerSheet = offsetY < 0 && offSheet.some((o) => o.problem.edge === 'top');
+
+  function setSheetHeight(n: number) {
+    const next = { ...template };
+    if (n > minSheet) next.sheetHeight = Math.min(500, n);
+    else delete next.sheetHeight;
+    change(next);
+  }
+
+  function switchToLongerSheet() {
+    setSheetHeight(longerSheet);
+    setOffsetY(0);
+    notify('info', `Sheet length set to ${longerSheet} mm and the upward shift removed. Print a test before saving.`);
+  }
 
   return (
     <div className="space-y-4">
@@ -223,6 +272,7 @@ export function CalibrationTool({ company }: { company: CompanyProfile }) {
         <div className="overflow-auto pt-3">
           <p className="text-xs text-gray-500 mb-2">
             {template.chequeWidth} × {template.chequeHeight} mm. "Pay", "Kenya Shillings", "Ksh" and "Date" are already printed on the cheque.
+            {sheet.heightMm > minSheet && ` The printer is given a ${sheet.widthMm} × ${sheet.heightMm} mm sheet with the cheque at its top.`}
           </p>
           <div
             className="relative border-2 border-dashed border-gray-400 bg-gray-100 select-none"
@@ -238,9 +288,34 @@ export function CalibrationTool({ company }: { company: CompanyProfile }) {
               <div key={`h${mm}`} className="absolute left-0 right-0 pointer-events-none" style={{ top: mm * SCALE, borderTop: '1px solid rgba(0,0,0,0.07)' }} />
             ))}
 
+            {(['top', 'bottom', 'left', 'right'] as const).map((edge) => {
+              const size = unreachable[edge];
+              if (size < 0.05) return null;
+              const across = edge === 'top' || edge === 'bottom';
+              return (
+                <div
+                  key={edge}
+                  data-testid={`unreachable-${edge}`}
+                  className="absolute pointer-events-none overflow-hidden"
+                  style={{
+                    [edge]: 0,
+                    ...(across ? { left: 0, right: 0, height: size * SCALE } : { top: 0, bottom: 0, width: size * SCALE }),
+                    background: UNREACHABLE_FILL,
+                  }}
+                >
+                  {across && size >= 4 && (
+                    <span className="absolute left-2 top-0.5 text-[10px] font-semibold text-red-800 bg-white/80 px-1 rounded">
+                      The printer cannot reach this {round1(size)} mm strip
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+
             {FIELD_KEYS.map((key) => {
               const f = template.fields[key];
               const placed = screenLayout.fields.find((p) => p.key === key)!;
+              const problem = printLayout.fields.find((p) => p.key === key)?.problem;
               const color = FIELD_COLORS[key];
               const boxHeight = f.wrap ? f.height ?? 18 : placed.lineHeightMm;
               return (
@@ -262,7 +337,15 @@ export function CalibrationTool({ company }: { company: CompanyProfile }) {
                 >
                   <span style={{ position: 'absolute', top: -14, left: 0, fontSize: 9, color, fontWeight: 'bold', whiteSpace: 'nowrap' }}>
                     {FIELD_LABELS[key]}
-                    {placed.overflow ? ' — does not fit' : placed.fontPt < f.fontSize ? ` — shrunk to ${placed.fontPt}pt` : ''}
+                    {problem?.kind === 'too_long'
+                      ? ' — does not fit'
+                      : problem?.kind === 'off_cheque'
+                        ? ' — over the edge of the cheque'
+                        : problem?.kind === 'off_sheet'
+                          ? ' — the printer cannot reach it'
+                          : placed.fontPt < f.fontSize
+                            ? ` — shrunk to ${placed.fontPt}pt`
+                            : ''}
                   </span>
                   {placed.lines.map((line, i) => (
                     <span
@@ -290,6 +373,33 @@ export function CalibrationTool({ company }: { company: CompanyProfile }) {
             })}
           </div>
         </div>
+
+        {offSheet.length > 0 && (
+          <div role="alert" data-testid="layout-warning" className="border border-red-200 bg-red-50 rounded-lg p-3 text-sm text-red-900 space-y-2">
+            <p className="flex items-start gap-2 font-medium">
+              <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+              <span>
+                With these printer settings the {offSheet.map((o) => `${fieldName(o.key)} would print ${describeOffSheet(o.problem)}`).join(', and the ')}, so the
+                printer would leave it out. Cheques for {company.name} are held until this is corrected.
+              </span>
+            </p>
+            {canUseLongerSheet ? (
+              <>
+                <p>
+                  When everything prints low by the same amount, the printer is using a longer sheet than the cheque — most cannot take paper shorter than
+                  about 127 mm — and the cheque gets centred on it. Shifting up cannot reach above the top of the sheet. Tell the printer about the longer
+                  sheet instead:
+                </p>
+                <Button variant="primary" onClick={switchToLongerSheet} data-testid="use-longer-sheet">
+                  Use a {longerSheet} mm sheet and remove the shift
+                </Button>
+                <p className="text-xs">Then print a test on plain paper and check it against a cheque before saving.</p>
+              </>
+            ) : (
+              <p>Reduce the printer shift, or move the field further from that edge.</p>
+            )}
+          </div>
+        )}
 
         <div className="grid grid-cols-3 gap-4 items-start">
           <div className="space-y-3">
@@ -393,6 +503,13 @@ export function CalibrationTool({ company }: { company: CompanyProfile }) {
               step={1}
               onChange={(n) => change({ ...template, pageTopOffset: Math.max(0, n) })}
               hint="0 for a loose cheque leaf"
+            />
+            <NumberInput
+              label="Sheet length given to the printer (mm)"
+              value={sheet.heightMm}
+              step={1}
+              onChange={setSheetHeight}
+              hint={`${minSheet} = same as the cheque. If the whole print lands low, use 127 or more instead of shifting up: most printers cannot take a shorter sheet.`}
             />
           </div>
         </div>

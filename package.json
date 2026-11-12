@@ -60,9 +60,10 @@
       "icon": "build/icon.png"
     },
     "nsis": {
-      "oneClick": false,
+      "oneClick": true,
       "perMachine": false,
-      "allowToChangeInstallationDirectory": false,
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": false,
       "createDesktopShortcut": true,
       "shortcutName": "Cheque Printer",
       "artifactName": "Cheque-Printer-Setup-${version}.exe"

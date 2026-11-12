@@ -16,6 +16,7 @@ export const FIELD_KEYS: FieldKey[] = ['date', 'payee', 'amountFigures', 'amount
 const PT_TO_MM = 25.4 / 72;
 const LINE_BOX = 1.2; // line box height as a multiple of the font size
 const FIT_MARGIN = 0.98;
+const EDGE_MM = 0.01; // rounding allowance when testing against an edge
 
 export const FONT_STACKS: Record<FontFamily, string> = {
   Arial: "Arial, Helvetica, 'Liberation Sans', sans-serif",
@@ -56,8 +57,37 @@ export interface PlacedField {
   fontFamily: FontFamily;
   fontWeight: 'normal' | 'bold';
   align: 'left' | 'center' | 'right';
-  /** True when the text does not fit even at the smallest font. Never print these. */
+  /** True when the field cannot be printed as placed (see problem). Never print these. */
   overflow: boolean;
+  problem?: FieldProblem;
+}
+
+export type SheetEdge = 'top' | 'bottom' | 'left' | 'right';
+
+/** Why a field must not be printed. */
+export type FieldProblem =
+  /** The text does not fit its space even at the smallest font. */
+  | { kind: 'too_long' }
+  /** The layout puts the text over the edge of the cheque itself. */
+  | { kind: 'off_cheque' }
+  /** On the cheque, but outside the sheet the printer is given, so it would be left out. */
+  | { kind: 'off_sheet'; edge: SheetEdge; byMm: number };
+
+const FIELD_NAMES: Record<FieldKey, string> = {
+  date: 'date',
+  payee: 'payee',
+  amountFigures: 'amount',
+  amountWords: 'amount in words',
+};
+
+export function fieldName(key: FieldKey): string {
+  return FIELD_NAMES[key];
+}
+
+/** "7.1 mm above the top of the sheet" */
+export function describeOffSheet(problem: { edge: SheetEdge; byMm: number }): string {
+  const where = { top: 'above the top', bottom: 'below the bottom', left: 'past the left edge', right: 'past the right edge' }[problem.edge];
+  return `${problem.byMm} mm ${where} of the sheet`;
 }
 
 export interface ChequeLayout {
@@ -149,27 +179,61 @@ export function layoutCheque(
   const originX = company.printerOffsetX;
   const originY = company.printerOffsetY + t.pageTopOffset;
   const page = pageSizeMm(t);
-  const fields = FIELD_KEYS.map((key) => {
+  const fields = FIELD_KEYS.map((key): PlacedField => {
     const field = placeField(key, values[key].trim(), t.fields[key], originX, originY, measure);
-    // Any text hanging over the edge of the leaf would be cut off by the printer.
-    const offPage = field.lines.some((line) => {
+    if (field.overflow) return { ...field, problem: { kind: 'too_long' } };
+
+    let offCheque = false;
+    let worst: { edge: SheetEdge; byMm: number } | null = null;
+    for (const line of field.lines) {
+      // Where the ink of this line really is, on the sheet the printer is given.
       const textWidth = measure(line.text, field.fontPt, field.fontFamily, field.fontWeight);
       const slack = field.widthMm - textWidth;
       const left = line.xMm + (field.align === 'right' ? slack : field.align === 'center' ? slack / 2 : 0);
-      return (
-        left < -0.01 ||
-        left + textWidth > page.widthMm + 0.01 ||
-        line.yMm < -0.01 ||
-        line.yMm + field.lineHeightMm > page.heightMm + 0.01
-      );
-    });
-    return offPage ? { ...field, overflow: true } : field;
+      const right = left + textWidth;
+      const top = line.yMm;
+      const bottom = top + field.lineHeightMm;
+
+      // The same line on the cheque itself: the printer shift does not move the leaf.
+      if (
+        left - originX < -EDGE_MM ||
+        right - originX > t.chequeWidth + EDGE_MM ||
+        top - originY < -EDGE_MM ||
+        bottom - originY > t.chequeHeight + EDGE_MM
+      ) {
+        offCheque = true;
+      }
+
+      // Anything outside the sheet is silently left out by the printer.
+      const over: [SheetEdge, number][] = [
+        ['top', -top],
+        ['bottom', bottom - page.heightMm],
+        ['left', -left],
+        ['right', right - page.widthMm],
+      ];
+      for (const [edge, byMm] of over) {
+        if (byMm > EDGE_MM && (!worst || byMm > worst.byMm)) worst = { edge, byMm };
+      }
+    }
+    if (offCheque) return { ...field, overflow: true, problem: { kind: 'off_cheque' } };
+    if (worst) {
+      return { ...field, overflow: true, problem: { kind: 'off_sheet', edge: worst.edge, byMm: Math.round(worst.byMm * 10) / 10 } };
+    }
+    return field;
   });
   return { fields, overflow: fields.filter((f) => f.overflow).map((f) => f.key) };
 }
 
+/**
+ * The sheet the printer is told about. It starts as the cheque (plus any
+ * carrier strip above it) and can be made longer for printers that will not
+ * take a sheet as short as a cheque; the cheque stays at the top.
+ */
 export function pageSizeMm(template: ChequeTemplate): { widthMm: number; heightMm: number } {
-  return { widthMm: template.chequeWidth, heightMm: template.chequeHeight + template.pageTopOffset };
+  return {
+    widthMm: template.chequeWidth,
+    heightMm: Math.max(template.chequeHeight + template.pageTopOffset, template.sheetHeight ?? 0),
+  };
 }
 
 export function escapeHtml(text: string): string {
@@ -206,7 +270,7 @@ export function buildPrintHtml(
         .join('\n');
       const guides = options.guides
         ? `<div class="g" style="top:${mm(template.pageTopOffset)}"></div>` +
-          `<div class="g" style="top:${mm(heightMm - 0.3)}"></div>`
+          `<div class="g" style="top:${mm(Math.min(heightMm - 0.3, template.pageTopOffset + template.chequeHeight))}"></div>`
         : '';
       return `<div class="page">${guides}\n${lines}\n</div>`;
     })

@@ -100,6 +100,27 @@ describe('issues that hold a cheque', () => {
     expect(isSigned(cheque)).toBe(true);
   });
 
+  it('a layout that pushes a field off the sheet holds the cheque and says so plainly', () => {
+    const shifted = makeCompany('Shifted Ltd', { printerOffsetY: -15 });
+    shifted.template.fields.date.y = 7.9;
+    const cheque = makeCheque(shifted);
+    const issues = createIssueChecker(makeStore([shifted], [cheque]), fakeMeasure)(cheque);
+    expect(kinds(issues)).toEqual(['layout_off_sheet']);
+    expect(issues[0].message).toContain('cannot print the date (7.1 mm above the top of the sheet)');
+    expect(issues[0].message).not.toMatch(/too long/i);
+
+    // Correcting the layout releases it: nothing about the cheque itself was wrong.
+    const corrected = { ...shifted, printerOffsetY: 0, template: { ...shifted.template, sheetHeight: 115 } };
+    expect(createIssueChecker(makeStore([corrected], [cheque]), fakeMeasure)(cheque)).toEqual([]);
+  });
+
+  it('text that is too long is still reported as too long', () => {
+    const cheque = makeCheque(co, { payee: 'X'.repeat(400) });
+    const issues = createIssueChecker(makeStore([co], [cheque]), fakeMeasure)(cheque);
+    expect(kinds(issues)).toEqual(['text_too_long']);
+    expect(issues[0].message).toContain('Too long to fit on the cheque: payee');
+  });
+
   it('unsigned is held until an approver overrides', () => {
     const cheque = makeCheque(co, { req: { signature: { status: 'not_signed' } } });
     let store = makeStore([co], [cheque]);

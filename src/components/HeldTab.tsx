@@ -24,7 +24,7 @@ type Dialog =
   | { type: 'results'; company: CompanyProfile; cheques: Cheque[] };
 
 export function HeldTab() {
-  const { held, issuesOf, store, user, run, notify } = useApp();
+  const { held, issuesOf, store, user, run, notify, setTab } = useApp();
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const close = () => setDialog(null);
 
@@ -94,6 +94,12 @@ export function HeldTab() {
           <Button small onClick={() => setDialog({ type: 'edit', cheque })} data-testid="edit-open">Check details…</Button>
         ) : (
           needs('a supervisor')
+        );
+      case 'layout_off_sheet':
+        return can(user, 'manage_companies') ? (
+          <Button small onClick={() => setTab('setup')} data-testid="layout-open">Open Setup…</Button>
+        ) : (
+          needs('an administrator')
         );
       case 'signature_zone_missing':
         return company && can(user, 'manage_companies') ? (

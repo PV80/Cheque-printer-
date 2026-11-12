@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildPrintHtml, chequeValues, DEFAULT_TEMPLATE, layoutCheque, MIN_FONT_PT, pageSizeMm } from '../src/core/layout';
+import { buildPrintHtml, chequeValues, DEFAULT_TEMPLATE, describeOffSheet, layoutCheque, MIN_FONT_PT, pageSizeMm } from '../src/core/layout';
 import { fakeMeasure, makeCompany } from './helpers';
 
 const values = chequeValues({ date: '2026-06-05', payee: 'Paul Angalushe', amountCents: 5_800_000 });
@@ -77,6 +77,60 @@ describe('layoutCheque', () => {
     expect(layoutCheque(values, tooLow, fakeMeasure).overflow).toEqual(['amountWords']);
   });
 
+  it('says why a field cannot be printed', () => {
+    const problemOf = (company: ReturnType<typeof makeCompany>, v = values) =>
+      Object.fromEntries(layoutCheque(v, company, fakeMeasure).fields.map((f) => [f.key, f.problem]));
+
+    expect(problemOf(makeCompany('Fine Ltd'))).toEqual({ date: undefined, payee: undefined, amountFigures: undefined, amountWords: undefined });
+    expect(problemOf(makeCompany('Long Ltd'), { ...values, payee: 'X'.repeat(400) }).payee).toEqual({ kind: 'too_long' });
+
+    const overEdge = makeCompany('Edge Ltd');
+    overEdge.template.fields.amountWords.y = 84;
+    expect(problemOf(overEdge).amountWords).toEqual({ kind: 'off_cheque' });
+  });
+
+  it('holds a field that a printer shift pushes off the sheet, and says by how much', () => {
+    // The office case: a 177 x 100 mm cheque, date 7.9 mm from the top, everything shifted up 15 mm.
+    const company = makeCompany('Shifted Ltd', { printerOffsetY: -15 });
+    company.template.chequeWidth = 177;
+    company.template.chequeHeight = 100;
+    company.template.fields.date = { ...company.template.fields.date, x: 133.1, y: 7.9 };
+    company.template.fields.amountFigures.x = 120;
+
+    const layout = layoutCheque(values, company, fakeMeasure);
+    expect(layout.overflow).toEqual(['date']);
+    expect(layout.fields.find((f) => f.key === 'date')!.problem).toEqual({ kind: 'off_sheet', edge: 'top', byMm: 7.1 });
+    expect(describeOffSheet({ edge: 'top', byMm: 7.1 })).toBe('7.1 mm above the top of the sheet');
+
+    // The fix: give the printer the longer sheet it is really using, with the cheque at its top.
+    company.printerOffsetY = 0;
+    company.template.sheetHeight = 130;
+    const fixed = layoutCheque(values, company, fakeMeasure);
+    expect(fixed.overflow).toEqual([]);
+    expect(fixed.fields.find((f) => f.key === 'date')!.lines[0]).toMatchObject({ xMm: 133.1, yMm: 7.9 });
+    expect(pageSizeMm(company.template)).toEqual({ widthMm: 177, heightMm: 130 });
+  });
+
+  it('names the edge of the sheet a field falls off', () => {
+    const edgeOf = (company: ReturnType<typeof makeCompany>, key: string) => {
+      const problem = layoutCheque(values, company, fakeMeasure).fields.find((f) => f.key === key)!.problem;
+      return problem?.kind === 'off_sheet' ? problem.edge : problem?.kind;
+    };
+    expect(edgeOf(makeCompany('R Ltd', { printerOffsetX: 60 }), 'amountFigures')).toBe('right');
+    expect(edgeOf(makeCompany('L Ltd', { printerOffsetX: -30 }), 'payee')).toBe('left');
+    expect(edgeOf(makeCompany('D Ltd', { printerOffsetY: 45 }), 'amountWords')).toBe('bottom');
+    // A longer sheet gives room below the cheque as well.
+    const longer = makeCompany('D2 Ltd', { printerOffsetY: 45 });
+    longer.template.sheetHeight = 127;
+    expect(edgeOf(longer, 'amountWords')).toBeUndefined();
+  });
+
+  it('never makes the sheet shorter than the cheque', () => {
+    const company = makeCompany('Short Ltd');
+    company.template.sheetHeight = 40;
+    expect(pageSizeMm(company.template)).toEqual({ widthMm: 215, heightMm: 85 });
+  });
+
   it('wraps amount words on to the second ruled line', () => {
     const company = makeCompany('A Ltd');
     const v = chequeValues({ date: '2026-06-05', payee: 'X', amountCents: 123_456_789_012 });
@@ -120,6 +174,15 @@ describe('buildPrintHtml', () => {
     const html = buildPrintHtml([layoutCheque(values, tall, fakeMeasure)], tall.template, { title: 'T' });
     expect(html).toContain('@page{size:215mm 105mm;margin:0}');
     expect(html).toContain('top:54mm');
+  });
+
+  it('sends a longer sheet with the cheque at its top when the printer needs one', () => {
+    const longer = makeCompany('Longer Ltd');
+    longer.template.sheetHeight = 127;
+    const html = buildPrintHtml([layoutCheque(values, longer, fakeMeasure)], longer.template, { title: 'T', guides: true });
+    expect(html).toContain('@page{size:215mm 127mm;margin:0}');
+    expect(html).toContain('top:34mm'); // the payee has not moved
+    expect(html).toContain('class="g" style="top:85mm"'); // the guide still marks the bottom of the cheque
   });
 
   it('escapes anything that came from a PDF', () => {

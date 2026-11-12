@@ -3,7 +3,7 @@
 
 import { formatMoney } from './amount';
 import { dateWarning, formatTimestamp, formatTimestampDate, isValidIsoDate } from './dates';
-import { chequeValues, layoutCheque, type Measure } from './layout';
+import { chequeValues, describeOffSheet, fieldName, layoutCheque, type Measure } from './layout';
 import { FORM_LABELS } from './company';
 import type { Cheque, OverrideKind, Requisition, Store } from './types';
 
@@ -18,7 +18,8 @@ export type IssueKind =
   | 'unsigned'
   | 'duplicate_number'
   | 'duplicate_payment'
-  | 'text_too_long';
+  | 'text_too_long'
+  | 'layout_off_sheet';
 
 export interface Issue {
   kind: IssueKind;
@@ -213,12 +214,28 @@ export function createIssueChecker(store: Store, measure?: Measure): (cheque: Ch
     }
 
     if (company && measure && missing.length === 0) {
-      const overflow = layoutCheque(chequeValues(cheque), company, measure).overflow;
-      if (overflow.length) {
-        const names = overflow.map((k) => (k === 'amountWords' ? 'amount in words' : k === 'amountFigures' ? 'amount' : k));
+      const placed = layoutCheque(chequeValues(cheque), company, measure).fields;
+
+      // The words themselves are the problem: fixed by editing this cheque.
+      const tooLong = placed.filter((f) => f.problem?.kind === 'too_long');
+      if (tooLong.length) {
         issues.push({
           kind: 'text_too_long',
-          message: `Too long to fit on the cheque: ${names.join(', ')}. Shorten it or widen the field in the company layout.`,
+          message: `Too long to fit on the cheque: ${tooLong.map((f) => fieldName(f.key)).join(', ')}. Shorten it or widen the field in the company layout.`,
+        });
+      }
+
+      // The company's layout or printer settings are the problem: every cheque
+      // of this company is affected, and only the layout screen can fix it.
+      const misplaced = placed.flatMap((f) => {
+        if (f.problem?.kind === 'off_sheet') return [`the ${fieldName(f.key)} (${describeOffSheet(f.problem)})`];
+        if (f.problem?.kind === 'off_cheque') return [`the ${fieldName(f.key)} (over the edge of the cheque)`];
+        return [];
+      });
+      if (misplaced.length) {
+        issues.push({
+          kind: 'layout_off_sheet',
+          message: `The cheque layout for ${company.name} cannot print ${misplaced.join(' and ')}. An administrator needs to correct it in Setup → Companies → Cheque layout.`,
         });
       }
     }

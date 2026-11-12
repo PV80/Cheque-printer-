@@ -70,8 +70,18 @@ jobs:
       - name: End-to-end test on Windows
         run: npm run e2e
 
+      # Every build gets a higher version number, so anyone can see which copy is
+      # installed and Windows treats the next installer as an update.
       - name: Package installer
-        run: npx electron-builder --win nsis --x64 --publish never
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(node -p "require('./package.json').version.split('.').slice(0, 2).join('.')").${GITHUB_RUN_NUMBER}"
+          fi
+          echo "Building version $VERSION"
+          npx electron-builder --win nsis --x64 --publish never -c.extraMetadata.version="$VERSION"
 
       - name: Upload installer
         uses: actions/upload-artifact@v4
@@ -79,6 +89,36 @@ jobs:
           name: Cheque-Printer-Setup
           path: release/*.exe
           if-no-files-found: error
+
+      # Install, put a data file where the office's register lives, install again
+      # over the top: the app must still be there and the data untouched.
+      - name: Installing over an existing copy keeps the data
+        shell: pwsh
+        run: |
+          $setup = (Get-ChildItem release/*.exe | Select-Object -First 1).FullName
+          function Install {
+            $p = Start-Process -FilePath $setup -ArgumentList '/S' -Wait -PassThru
+            if ($p.ExitCode -ne 0) { throw "The installer exited with code $($p.ExitCode)" }
+          }
+          function InstalledApp {
+            Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'Programs') -Recurse -Filter 'Cheque Printer.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+          }
+
+          Install
+          if (-not (InstalledApp)) { throw 'The app was not installed' }
+
+          $data = Join-Path $env:APPDATA 'Cheque Printer'
+          New-Item -ItemType Directory -Force -Path $data | Out-Null
+          Set-Content -Path (Join-Path $data 'data.json') -Value '{"version":1,"marker":"kept"}'
+          New-Item -ItemType Directory -Force -Path (Join-Path $data 'requisitions') | Out-Null
+          Set-Content -Path (Join-Path $data 'requisitions\sample.pdf') -Value 'kept'
+
+          Install
+          $app = InstalledApp
+          if (-not $app) { throw 'The app is missing after installing over the top' }
+          if ((Get-Content (Join-Path $data 'data.json') -Raw) -notmatch 'kept') { throw 'Updating changed the data file' }
+          if (-not (Test-Path (Join-Path $data 'requisitions\sample.pdf'))) { throw 'Updating removed archived requisitions' }
+          Write-Host "Updated in place at $($app.FullName). Data folder untouched."
 
       - name: Keep screenshots if the end-to-end test fails
         if: failure()

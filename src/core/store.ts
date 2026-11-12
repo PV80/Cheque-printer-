@@ -131,10 +131,12 @@ function sanitizeTemplate(raw: unknown): ChequeTemplate {
   const f = isObject(t.fields) ? t.fields : {};
   const fields = {} as ChequeTemplate['fields'];
   for (const key of FIELD_KEYS) fields[key] = sanitizeField(f[key], DEFAULT_TEMPLATE.fields[key]);
+  const sheetHeight = clamp(num(t.sheetHeight, 0), 0, 500);
   return {
     chequeWidth: clamp(num(t.chequeWidth, DEFAULT_TEMPLATE.chequeWidth), 50, 400),
     chequeHeight: clamp(num(t.chequeHeight, DEFAULT_TEMPLATE.chequeHeight), 30, 400),
     pageTopOffset: clamp(num(t.pageTopOffset, 0), 0, 400),
+    ...(sheetHeight > 0 ? { sheetHeight } : {}),
     fields,
   };
 }

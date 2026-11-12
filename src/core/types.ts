@@ -38,6 +38,13 @@ export interface ChequeTemplate {
   chequeWidth: number; // mm
   chequeHeight: number; // mm
   pageTopOffset: number; // mm from top of the sheet to the top of the cheque
+  /**
+   * Length (mm) of the sheet the printer is told about, when it must be longer
+   * than the cheque. Most printers refuse paper shorter than about 127 mm; given
+   * a shorter page they centre it on their own longer sheet and everything
+   * prints low. Unset = the sheet ends where the cheque ends.
+   */
+  sheetHeight?: number;
   fields: Record<FieldKey, FieldPosition>;
 }
 

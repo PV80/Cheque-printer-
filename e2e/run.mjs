@@ -6,7 +6,7 @@
 // and "printing" is captured as a PDF so the positions can be measured.
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -513,6 +513,50 @@ async function main() {
   const giQueue = await queueNumbers(page, GI);
   check(giQueue.includes('119') && giQueue.includes('000150'), 'both requisitions signed on page two are now queued');
   check(giQueue.includes('000128'), 'vouchers signed on page one still pass with two boxes saved');
+
+  step('A printer that cannot take a sheet as short as a cheque');
+  // Such a printer centres the cheque page on its own longer sheet, so everything lands low.
+  // Shifting up to compensate pushes the date above the top of the sheet, where nothing prints.
+  const openLayout = async () => {
+    await tab(page, 'setup');
+    await page.getByRole('button', { name: GI }).first().click();
+    await page.locator('[data-testid=save-layout]').waitFor();
+  };
+  const shiftDown = page.getByLabel('Shift down (mm)', { exact: true });
+  const sheetLength = page.getByLabel('Sheet length given to the printer (mm)', { exact: true });
+  await openLayout();
+  checkEqual(await sheetLength.inputValue(), '85', 'the sheet starts out the same length as the cheque');
+  await shiftDown.fill('-15');
+  const layoutWarning = page.locator('[data-testid=layout-warning]');
+  await layoutWarning.waitFor();
+  check((await layoutWarning.innerText()).includes('date would print 3 mm above the top of the sheet'), 'the layout screen says the date would fall off the top of the sheet');
+  check(await page.locator('[data-testid=unreachable-top]').isVisible(), 'the strip the printer cannot reach is shown on the cheque');
+  await shot(page, '06-off-the-sheet');
+  await page.click('[data-testid=save-layout]');
+  await tab(page, 'held');
+  const offSheetRow = page.locator('[data-testid=held-list] > li[data-cheque="000128"]');
+  await offSheetRow.waitFor();
+  checkEqual(await heldIssues(page, '000128'), ['layout_off_sheet'], 'cheques for that company are held rather than printed without a date');
+  const offSheetText = await offSheetRow.locator('[data-issue=layout_off_sheet]').innerText();
+  check(offSheetText.includes('cannot print the date') && !/too long/i.test(offSheetText), 'the reason given is the layout, not the length of the date');
+  await offSheetRow.locator('[data-testid=layout-open]').click();
+  await page.getByRole('button', { name: GI }).first().click();
+  await page.click('[data-testid=use-longer-sheet]');
+  await layoutWarning.waitFor({ state: 'detached' });
+  checkEqual([await shiftDown.inputValue(), await sheetLength.inputValue()], ['0', '115'], 'one click removes the shift and gives the printer a sheet 2 × 15 mm longer');
+  await page.click('[data-testid=print-test]');
+  await page.getByText('Test page sent').waitFor();
+  // Captured prints are numbered from 1 again after each restart, so take the newest file.
+  const newestPrint = readdirSync(dirs.prints)
+    .map((name) => join(dirs.prints, name))
+    .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0];
+  const testPage = (await readPrintedPdf(newestPrint))[0];
+  check(Math.abs(testPage.widthMm - 215) < 0.5 && Math.abs(testPage.heightMm - 115) < 0.5, `the printer is sent a 215 × 115 mm sheet (measured ${testPage.widthMm.toFixed(1)} × ${testPage.heightMm.toFixed(1)})`);
+  const testDate = testPage.items.find((i) => i.str.includes('05/06/2026'));
+  check(!!testDate && Math.abs(testDate.baselineMm - (12 + 3.7)) < 0.7, `the date prints 12 mm from the top of that sheet, where the cheque is (baseline ${testDate?.baselineMm.toFixed(2)})`);
+  await page.click('[data-testid=save-layout]');
+  await tab(page, 'queue');
+  check((await queueNumbers(page, GI)).includes('000128'), 'with the layout corrected the held cheques go back to the print queue by themselves');
 
   step('Send the register to another computer');
   await tab(page, 'register');

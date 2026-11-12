@@ -14,7 +14,22 @@ print one company at a time with a prompt that says exactly which leaves to load
    **Releases** once a version has been tagged).
 2. Run it. Windows will show "Windows protected your PC" because the installer is not
    code-signed — choose **More info → Run anyway**.
-3. Open **Cheque Printer** from the desktop shortcut.
+3. It installs without further questions and opens **Cheque Printer**. A desktop shortcut is added.
+
+### Updating to a newer version
+
+Run the newer `Cheque-Printer-Setup-x.y.z.exe` on the same computer, signed in to Windows as
+the same person. Close Cheque Printer first. The installer replaces the program and opens it
+again; there is nothing to uninstall and nothing to set up again. Companies, cheque layouts,
+signature boxes, people, the register and the archived requisitions are kept, because they
+live in the data folder (see *Data and backups*), which the installer never touches.
+
+The version number is shown on the sign-in screen and under Setup → Data and backup, and it
+goes up with every build.
+
+If two Cheque Printer icons ever appear, an older copy was installed "for anyone who uses
+this computer": remove the older one in Windows Settings → Apps. Removing the program does
+not remove the data either.
 
 ## First-time setup (administrator, about 30 minutes)
 
@@ -42,6 +57,15 @@ print one company at a time with a prompt that says exactly which leaves to load
    print a test on plain paper → hold it against a real cheque up to the light → nudge the
    fields → repeat until it lines up → Save. For a second company whose cheque is nearly the
    same, use **Copy layout from…** and adjust only what differs.
+   - **If the whole print lands too low by the same amount** (typically 13–15 mm), do not
+     shift it up. Most office printers cannot take paper shorter than about 127 mm, and a
+     cheque is shorter than that; the printer then uses its own longer sheet and the cheque
+     page ends up centred on it. Set **Sheet length given to the printer** to 127 or more and
+     leave the shift at 0: the cheque is then printed at the top of that sheet, where the leaf
+     really is. If the Windows printer has a custom "cheque" paper size, make it the same
+     width and the same length as this sheet.
+   - The layout screen hatches any strip of the cheque the printer cannot reach with the
+     current settings, and warns if a field sits in it.
 5. **Choose the printer** for each company, or leave "Ask each time". In the Windows print
    window always keep scaling at 100% / actual size.
 6. **Add the people** who will use it (Setup → People) with the right role.
@@ -116,6 +140,9 @@ other.
   unless the earlier cheque was marked spoiled, which is the normal re-issue case.
 - Text that would not fit is shrunk; if it still cannot fit, the cheque is held rather than
   printed cut off.
+- If a company's layout or printer shift would put a field off the edge of the sheet (where
+  the printer silently leaves it out), that company's cheques are held, and the reason names
+  the field and the edge. They return to the queue as soon as the layout is corrected.
 - Cheques are marked "sent to the printer" on disk before the job starts. If the app is closed
   or signs out before the result is recorded, they are held — not offered for printing again —
   until someone records what came out.

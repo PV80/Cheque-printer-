@@ -6,7 +6,7 @@ import { useApp } from '../state/AppContext';
 import { Button, Field, Notice } from './ui';
 
 export function LoginScreen() {
-  const { store } = useApp();
+  const { store, info } = useApp();
   return (
     <div className="min-h-screen flex items-center justify-center p-6 bg-gray-100">
       <div className="w-full max-w-sm bg-white rounded-xl shadow-lg border border-gray-200 p-7">
@@ -14,7 +14,9 @@ export function LoginScreen() {
           <div className="w-10 h-10 rounded-lg bg-ncba-dark text-white flex items-center justify-center font-bold">CP</div>
           <div>
             <h1 className="font-semibold text-lg text-gray-800 leading-tight">Cheque Printer</h1>
-            <p className="text-xs text-gray-500">Runs on this computer only</p>
+            <p className="text-xs text-gray-500" data-testid="app-version">
+              Runs on this computer only{info?.version ? ` · version ${info.version}` : ''}
+            </p>
           </div>
         </div>
         {store.users.length === 0 ? <FirstRun /> : <SignIn />}

@@ -25,6 +25,13 @@ export function ChequePreview({ layout, template, scale = 3.2 }: Props) {
       {template.pageTopOffset > 0 && (
         <div className="absolute inset-x-0 top-0 bg-gray-100 border-b border-dashed border-gray-300" style={{ height: template.pageTopOffset * scale }} />
       )}
+      {heightMm > template.pageTopOffset + template.chequeHeight && (
+        <div
+          className="absolute inset-x-0 bottom-0 bg-gray-100 border-t border-dashed border-gray-300"
+          style={{ top: (template.pageTopOffset + template.chequeHeight) * scale }}
+          title="Blank part of the printer's sheet below the cheque"
+        />
+      )}
       {layout.fields.flatMap((field) =>
         field.lines.map((line, i) => (
           <div
