@@ -205,19 +205,23 @@ export function CalibrationTool({ company }: { company: CompanyProfile }) {
   const offSheet = printLayout.fields.flatMap((p) => (p.problem?.kind === 'off_sheet' ? [{ key: p.key, problem: p.problem }] : []));
 
   // Strips of the cheque that fall outside that sheet: nothing placed there can print.
-  const originY = offsetY + template.pageTopOffset;
+  // Upside down, the bottom of the cheque is the end nearest the top of the sheet.
+  const rotated = template.rotate180 === true;
   const within = (n: number, max: number) => Math.min(max, Math.max(0, n));
+  const nearSheetTop = rotated ? offsetY - template.pageTopOffset : -(offsetY + template.pageTopOffset);
+  const nearSheetBottom = template.pageTopOffset + template.chequeHeight - sheet.heightMm + (rotated ? -offsetY : offsetY);
   const unreachable = {
-    top: within(-originY, template.chequeHeight),
-    bottom: within(originY + template.chequeHeight - sheet.heightMm, template.chequeHeight),
+    top: within(rotated ? nearSheetBottom : nearSheetTop, template.chequeHeight),
+    bottom: within(rotated ? nearSheetTop : nearSheetBottom, template.chequeHeight),
     left: within(-offsetX, template.chequeWidth),
     right: within(offsetX + template.chequeWidth - sheet.widthMm, template.chequeWidth),
   };
 
   // A page shorter than the printer's own sheet is centred on it, so a print that
-  // lands N mm low means the sheet is 2N mm longer than the page it was sent.
+  // is out by N mm means the sheet is 2N mm longer than the page it was sent.
   const longerSheet = Math.ceil(sheet.heightMm + 2 * Math.abs(offsetY));
-  const canUseLongerSheet = offsetY < 0 && offSheet.some((o) => o.problem.edge === 'top');
+  const shiftedPastSheetTop = rotated ? offsetY > 0 : offsetY < 0;
+  const canUseLongerSheet = shiftedPastSheetTop && offSheet.some((o) => o.problem.edge === 'top');
 
   function setSheetHeight(n: number) {
     const next = { ...template };
@@ -229,7 +233,24 @@ export function CalibrationTool({ company }: { company: CompanyProfile }) {
   function switchToLongerSheet() {
     setSheetHeight(longerSheet);
     setOffsetY(0);
-    notify('info', `Sheet length set to ${longerSheet} mm and the upward shift removed. Print a test before saving.`);
+    notify('info', `Sheet length set to ${longerSheet} mm and the shift removed. Print a test before saving.`);
+  }
+
+  function setUpsideDown(on: boolean) {
+    const next = { ...template };
+    if (on) next.rotate180 = true;
+    else delete next.rotate180;
+    change(next);
+    // The printer has not moved. Seen from the cheque, which is now the other
+    // way round, its shift points the opposite way.
+    setOffsetX(-offsetX || 0);
+    setOffsetY(-offsetY || 0);
+    notify(
+      'info',
+      on
+        ? 'These cheques now print upside down: load each leaf bottom edge first. The printer shift was reversed to match. Print a test before saving.'
+        : 'These cheques print the right way up again: load each leaf top edge first. The printer shift was reversed to match. Print a test before saving.'
+    );
   }
 
   return (
@@ -273,6 +294,7 @@ export function CalibrationTool({ company }: { company: CompanyProfile }) {
           <p className="text-xs text-gray-500 mb-2">
             {template.chequeWidth} × {template.chequeHeight} mm. "Pay", "Kenya Shillings", "Ksh" and "Date" are already printed on the cheque.
             {sheet.heightMm > minSheet && ` The printer is given a ${sheet.widthMm} × ${sheet.heightMm} mm sheet with the cheque at its top.`}
+            {rotated && ' Printed upside down: the bottom edge of the leaf goes into the printer first.'}
           </p>
           <div
             className="relative border-2 border-dashed border-gray-400 bg-gray-100 select-none"
@@ -386,14 +408,24 @@ export function CalibrationTool({ company }: { company: CompanyProfile }) {
             {canUseLongerSheet ? (
               <>
                 <p>
-                  When everything prints low by the same amount, the printer is using a longer sheet than the cheque — most cannot take paper shorter than
-                  about 127 mm — and the cheque gets centred on it. Shifting up cannot reach above the top of the sheet. Tell the printer about the longer
-                  sheet instead:
+                  When the whole print lands the same distance too {rotated ? 'high' : 'low'}, the printer is using a longer sheet than the cheque — most
+                  cannot take paper shorter than about 127 mm — and the cheque gets centred on it. A shift cannot reach past the end of the sheet. Tell
+                  the printer about the longer sheet instead:
                 </p>
-                <Button variant="primary" onClick={switchToLongerSheet} data-testid="use-longer-sheet">
-                  Use a {longerSheet} mm sheet and remove the shift
-                </Button>
-                <p className="text-xs">Then print a test on plain paper and check it against a cheque before saving.</p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button variant="primary" onClick={switchToLongerSheet} data-testid="use-longer-sheet">
+                    Use a {longerSheet} mm sheet and remove the shift
+                  </Button>
+                  {!rotated && (
+                    <Button onClick={() => setUpsideDown(true)} data-testid="use-upside-down">
+                      Or print upside down
+                    </Button>
+                  )}
+                </div>
+                <p className="text-xs">
+                  {!rotated && 'Upside down, the leaf goes in bottom edge first, so the strip the printer cannot reach is at the bottom of the cheque. '}
+                  Then print a test on plain paper and check it against a cheque before saving.
+                </p>
               </>
             ) : (
               <p>Reduce the printer shift, or move the field further from that edge.</p>
@@ -489,6 +521,16 @@ export function CalibrationTool({ company }: { company: CompanyProfile }) {
               <NumberInput label="Shift right (mm)" value={offsetX} onChange={(n) => { setOffsetX(n); setDirty(true); }} hint="Negative = left" />
               <NumberInput label="Shift down (mm)" value={offsetY} onChange={(n) => { setOffsetY(n); setDirty(true); }} hint="Negative = up" />
             </div>
+            <label className="flex items-start gap-2 text-xs text-gray-700">
+              <input type="checkbox" className="mt-0.5" checked={rotated} onChange={(e) => setUpsideDown(e.target.checked)} data-testid="upside-down" />
+              <span>
+                Print upside down
+                <span className="block text-gray-400 leading-tight mt-0.5">
+                  Load the leaf bottom edge first. Any strip the printer cannot reach is then at the bottom of the cheque, clear of the date. Shifts
+                  are still as you read the cheque.
+                </span>
+              </span>
+            </label>
           </div>
 
           <div className="border border-gray-200 rounded-lg p-3 space-y-3 bg-white">

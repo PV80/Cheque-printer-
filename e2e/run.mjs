@@ -158,7 +158,7 @@ async function readPrintedPdf(file) {
       heightMm: viewport.height * MM,
       items: content.items
         .filter((i) => i.str && i.str.trim())
-        .map((i) => ({ str: i.str, xMm: i.transform[4] * MM, baselineMm: (viewport.height - i.transform[5]) * MM })),
+        .map((i) => ({ str: i.str, xMm: i.transform[4] * MM, baselineMm: (viewport.height - i.transform[5]) * MM, upsideDown: i.transform[0] < 0 })),
     });
   }
   return pages;
@@ -544,19 +544,60 @@ async function main() {
   await page.click('[data-testid=use-longer-sheet]');
   await layoutWarning.waitFor({ state: 'detached' });
   checkEqual([await shiftDown.inputValue(), await sheetLength.inputValue()], ['0', '115'], 'one click removes the shift and gives the printer a sheet 2 × 15 mm longer');
-  await page.click('[data-testid=print-test]');
-  await page.getByText('Test page sent').waitFor();
-  // Captured prints are numbered from 1 again after each restart, so take the newest file.
-  const newestPrint = readdirSync(dirs.prints)
-    .map((name) => join(dirs.prints, name))
-    .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0];
-  const testPage = (await readPrintedPdf(newestPrint))[0];
+  // Captured prints are numbered from 1 again after each restart, so wait for a file newer than any before.
+  const newestPrint = () =>
+    readdirSync(dirs.prints)
+      .map((name) => join(dirs.prints, name))
+      .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0];
+  const printTestPage = async () => {
+    const before = statSync(newestPrint()).mtimeMs;
+    await page.click('[data-testid=print-test]');
+    for (let tries = 0; tries < 100; tries++) {
+      await page.waitForTimeout(150);
+      const file = newestPrint();
+      if (statSync(file).mtimeMs > before) return (await readPrintedPdf(file))[0];
+    }
+    throw new Error('The test page was never sent to the printer');
+  };
+  const testPage = await printTestPage();
   check(Math.abs(testPage.widthMm - 215) < 0.5 && Math.abs(testPage.heightMm - 115) < 0.5, `the printer is sent a 215 × 115 mm sheet (measured ${testPage.widthMm.toFixed(1)} × ${testPage.heightMm.toFixed(1)})`);
   const testDate = testPage.items.find((i) => i.str.includes('05/06/2026'));
   check(!!testDate && Math.abs(testDate.baselineMm - (12 + 3.7)) < 0.7, `the date prints 12 mm from the top of that sheet, where the cheque is (baseline ${testDate?.baselineMm.toFixed(2)})`);
   await page.click('[data-testid=save-layout]');
   await tab(page, 'queue');
   check((await queueNumbers(page, GI)).includes('000128'), 'with the layout corrected the held cheques go back to the print queue by themselves');
+
+  step('Printing upside down: the leaf goes in bottom edge first');
+  // The other way round the same problem: the strip the printer cannot reach is then at the
+  // bottom of the cheque, where nothing is printed.
+  await openLayout();
+  await sheetLength.fill('85');
+  await shiftDown.fill('-15');
+  await layoutWarning.waitFor();
+  await page.click('[data-testid=use-upside-down]');
+  await layoutWarning.waitFor({ state: 'detached' });
+  check(await page.locator('[data-testid=upside-down]').isChecked(), 'the layout is switched to print upside down');
+  checkEqual(await shiftDown.inputValue(), '15', 'the printer shift is reversed to match, so nothing else has to be measured again');
+  check(await page.locator('[data-testid=unreachable-bottom]').isVisible(), 'the strip the printer cannot reach is now at the bottom of the cheque');
+  checkEqual(await page.locator('[data-testid=unreachable-top]').count(), 0, 'and no longer over the date');
+  await shot(page, '07-upside-down');
+  const turnedPage = await printTestPage();
+  check(Math.abs(turnedPage.widthMm - 215) < 0.5 && Math.abs(turnedPage.heightMm - 85) < 0.5, 'the sheet is cheque size again');
+  const turnedDate = turnedPage.items.find((i) => i.str.includes('05/06/2026'));
+  check(!!turnedDate && turnedDate.upsideDown, 'the date is printed, upside down');
+  // Read the right way up the date starts 148 mm from the left with its baseline about 15.35 mm
+  // down, moved 15 mm down by the shift. Turned about the centre of the 215 × 85 mm cheque.
+  check(
+    !!turnedDate && Math.abs(turnedDate.xMm - (215 - 148)) < 0.5 && Math.abs(turnedDate.baselineMm - (85 - 15.35 - 15)) < 0.7,
+    `it lands where the date is on a leaf fed bottom edge first (measured ${turnedDate?.xMm.toFixed(2)}, ${turnedDate?.baselineMm.toFixed(2)})`
+  );
+  check(turnedPage.items.every((i) => i.upsideDown), 'every field is turned, not only the date');
+  await page.click('[data-testid=save-layout]');
+  await tab(page, 'queue');
+  check((await queueNumbers(page, GI)).includes('000128'), 'cheques stay in the print queue: nothing falls off the sheet');
+  await page.locator(`section[data-company="${GI}"] [data-testid=print-company]`).click();
+  check((await page.locator('[data-testid=load-upside-down]').innerText()).includes('bottom edge going into the printer first'), 'the loading prompt tells the operator to load the leaves bottom edge first');
+  await page.getByRole('button', { name: 'Cancel' }).click();
 
   step('Send the register to another computer');
   await tab(page, 'register');

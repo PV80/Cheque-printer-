@@ -125,6 +125,35 @@ describe('layoutCheque', () => {
     expect(edgeOf(longer, 'amountWords')).toBeUndefined();
   });
 
+  it('upside down, the strip the printer cannot reach moves to the bottom of the cheque', () => {
+    // The same office cheque fed bottom edge first. The page still sits 15 mm in from the
+    // end that enters the printer, which is now the bottom of the cheque: seen from the
+    // cheque the print is 15 mm too high, so the shift is 15 mm down.
+    const company = makeCompany('Turned Ltd', { printerOffsetY: 15 });
+    company.template.chequeWidth = 177;
+    company.template.chequeHeight = 100;
+    company.template.rotate180 = true;
+    company.template.fields.date = { ...company.template.fields.date, x: 133.1, y: 7.9 };
+    company.template.fields.amountFigures.x = 120;
+
+    const layout = layoutCheque(values, company, fakeMeasure);
+    expect(layout.rotated).toBe(true);
+    expect(layout.overflow).toEqual([]); // the date prints
+    // Positions stay as the cheque is read; turning them is left to the printer page.
+    expect(layout.fields.find((f) => f.key === 'date')!.lines[0]).toMatchObject({ xMm: 133.1, yMm: 22.9 });
+
+    // Only something in the bottom 15 mm of the cheque would now be left out.
+    company.template.fields.amountWords.y = 90;
+    const words = layoutCheque(values, company, fakeMeasure).fields.find((f) => f.key === 'amountWords')!;
+    expect(words.problem).toEqual({ kind: 'off_sheet', edge: 'top', byMm: 9.7 });
+
+    // The right way up, the same shift would push the date off the far end instead.
+    delete company.template.rotate180;
+    company.template.fields.amountWords.y = 46;
+    company.printerOffsetY = -15;
+    expect(layoutCheque(values, company, fakeMeasure).overflow).toEqual(['date']);
+  });
+
   it('never makes the sheet shorter than the cheque', () => {
     const company = makeCompany('Short Ltd');
     company.template.sheetHeight = 40;
@@ -183,6 +212,20 @@ describe('buildPrintHtml', () => {
     expect(html).toContain('@page{size:215mm 127mm;margin:0}');
     expect(html).toContain('top:34mm'); // the payee has not moved
     expect(html).toContain('class="g" style="top:85mm"'); // the guide still marks the bottom of the cheque
+  });
+
+  it('turns the text half a turn about the centre of the cheque when printing upside down', () => {
+    const turned = makeCompany('Turned Ltd');
+    turned.template.rotate180 = true;
+    turned.template.sheetHeight = 127;
+    const html = buildPrintHtml([layoutCheque(values, turned, fakeMeasure)], turned.template, { title: 'T' });
+    expect(html).toContain('.r{position:absolute;left:0;top:0;width:100%;height:100%;transform:rotate(180deg)}');
+    // The centre of the 215 x 85 cheque at the top of the sheet, however long the sheet is.
+    expect(html).toContain('<div class="r" style="transform-origin:107.5mm 42.5mm">');
+    expect(html).toContain('top:34mm'); // fields are written where they are read
+
+    const upright = buildPrintHtml([layout], company.template, { title: 'T' });
+    expect(upright).not.toContain('<div class="r"');
   });
 
   it('escapes anything that came from a PDF', () => {

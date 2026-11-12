@@ -137,6 +137,7 @@ function sanitizeTemplate(raw: unknown): ChequeTemplate {
     chequeHeight: clamp(num(t.chequeHeight, DEFAULT_TEMPLATE.chequeHeight), 30, 400),
     pageTopOffset: clamp(num(t.pageTopOffset, 0), 0, 400),
     ...(sheetHeight > 0 ? { sheetHeight } : {}),
+    ...(t.rotate180 === true ? { rotate180: true } : {}),
     fields,
   };
 }

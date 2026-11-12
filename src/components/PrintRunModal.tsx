@@ -203,6 +203,11 @@ export function PrintRunModal({ company, cheques, missing, lastPrinted, onClose 
             Lowest number prints first. Total KES {formatMoney(total)}.
             {lastPrinted && ` Last cheque used for this company: ${lastPrinted}.`}
           </p>
+          {company.template.rotate180 && (
+            <p className="text-sm text-ncba-dark font-medium mt-2" data-testid="load-upside-down">
+              These cheques print upside down: load each leaf with its bottom edge going into the printer first.
+            </p>
+          )}
           {company.loadingNote && <p className="text-sm text-ncba-dark font-medium mt-2">{company.loadingNote}</p>}
         </div>
 

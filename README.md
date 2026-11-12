@@ -64,6 +64,12 @@ not remove the data either.
      leave the shift at 0: the cheque is then printed at the top of that sheet, where the leaf
      really is. If the Windows printer has a custom "cheque" paper size, make it the same
      width and the same length as this sheet.
+   - **Print upside down** is the other way round the same problem. The leaf goes into the
+     printer bottom edge first and the text is turned to match, so any strip the printer
+     cannot reach is at the bottom of the cheque, where nothing is printed, instead of over
+     the date. Field positions and shifts are still given as you read the cheque. Ticking it
+     reverses the printer shift for you; the loading prompt then tells the operator to load
+     the leaves bottom edge first. Use one or the other: a longer sheet, or upside down.
    - The layout screen hatches any strip of the cheque the printer cannot reach with the
      current settings, and warns if a field sits in it.
 5. **Choose the printer** for each company, or leave "Ask each time". In the Windows print

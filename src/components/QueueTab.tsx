@@ -228,6 +228,7 @@ export function QueueTab() {
           <p className="text-xs text-gray-500 mb-3">
             Where the text lands on a {previewCompany.name} cheque ({previewCompany.template.chequeWidth} × {previewCompany.template.chequeHeight} mm).
             The cheque's own printed labels are not shown.
+            {previewCompany.template.rotate180 && ' It is printed upside down: the bottom edge of the leaf goes into the printer first.'}
           </p>
           <div className="overflow-auto">
             <ChequePreview layout={layoutCheque(chequeValues(preview), previewCompany, measureText)} template={previewCompany.template} />

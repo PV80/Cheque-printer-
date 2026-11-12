@@ -737,6 +737,17 @@ describe('data file', () => {
     expect(parseStore(serializeStore(store))).toEqual(store);
   });
 
+  it('keeps the printer sheet settings of a layout, and ignores nonsense in their place', () => {
+    const co = makeCompany('Alpha Ltd');
+    co.template.sheetHeight = 130;
+    co.template.rotate180 = true;
+    expect(parseStore(serializeStore(makeStore([co]))).companies[0].template).toMatchObject({ sheetHeight: 130, rotate180: true });
+
+    const odd = parseStore(JSON.stringify({ version: 1, companies: [{ id: 'c1', name: 'Alpha Ltd', template: { rotate180: 'yes', sheetHeight: -5 } }] }));
+    expect(odd.companies[0].template.rotate180).toBeUndefined();
+    expect(odd.companies[0].template.sheetHeight).toBeUndefined();
+  });
+
   it('rejects files that are not ours or are from a newer version', () => {
     expect(() => parseStore('not json')).toThrow(StoreError);
     expect(() => parseStore('[]')).toThrow(StoreError);

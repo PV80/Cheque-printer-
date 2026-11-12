@@ -91,8 +91,11 @@ export function describeOffSheet(problem: { edge: SheetEdge; byMm: number }): st
 }
 
 export interface ChequeLayout {
+  /** Positions as the cheque is read, measured on the sheet the printer is given. */
   fields: PlacedField[];
   overflow: FieldKey[];
+  /** True when the printer turns all of it half a turn about the centre of the cheque. */
+  rotated: boolean;
 }
 
 export type ChequeValues = Record<FieldKey, string>;
@@ -179,6 +182,8 @@ export function layoutCheque(
   const originX = company.printerOffsetX;
   const originY = company.printerOffsetY + t.pageTopOffset;
   const page = pageSizeMm(t);
+  const rotated = t.rotate180 === true;
+  const pivot = chequePivotMm(t);
   const fields = FIELD_KEYS.map((key): PlacedField => {
     const field = placeField(key, values[key].trim(), t.fields[key], originX, originY, measure);
     if (field.overflow) return { ...field, problem: { kind: 'too_long' } };
@@ -204,12 +209,18 @@ export function layoutCheque(
         offCheque = true;
       }
 
+      // Upside down, the printer turns everything half a turn about the centre of the cheque.
+      const sheetLeft = rotated ? 2 * pivot.xMm - right : left;
+      const sheetRight = rotated ? 2 * pivot.xMm - left : right;
+      const sheetTop = rotated ? 2 * pivot.yMm - bottom : top;
+      const sheetBottom = rotated ? 2 * pivot.yMm - top : bottom;
+
       // Anything outside the sheet is silently left out by the printer.
       const over: [SheetEdge, number][] = [
-        ['top', -top],
-        ['bottom', bottom - page.heightMm],
-        ['left', -left],
-        ['right', right - page.widthMm],
+        ['top', -sheetTop],
+        ['bottom', sheetBottom - page.heightMm],
+        ['left', -sheetLeft],
+        ['right', sheetRight - page.widthMm],
       ];
       for (const [edge, byMm] of over) {
         if (byMm > EDGE_MM && (!worst || byMm > worst.byMm)) worst = { edge, byMm };
@@ -221,7 +232,12 @@ export function layoutCheque(
     }
     return field;
   });
-  return { fields, overflow: fields.filter((f) => f.overflow).map((f) => f.key) };
+  return { fields, overflow: fields.filter((f) => f.overflow).map((f) => f.key), rotated };
+}
+
+/** The centre of the cheque on the sheet: what an upside-down print turns about. */
+export function chequePivotMm(template: ChequeTemplate): { xMm: number; yMm: number } {
+  return { xMm: template.chequeWidth / 2, yMm: template.pageTopOffset + template.chequeHeight / 2 };
 }
 
 /**
@@ -272,7 +288,11 @@ export function buildPrintHtml(
         ? `<div class="g" style="top:${mm(template.pageTopOffset)}"></div>` +
           `<div class="g" style="top:${mm(Math.min(heightMm - 0.3, template.pageTopOffset + template.chequeHeight))}"></div>`
         : '';
-      return `<div class="page">${guides}\n${lines}\n</div>`;
+      const pivot = chequePivotMm(template);
+      const body = layout.rotated
+        ? `<div class="r" style="transform-origin:${mm(pivot.xMm)} ${mm(pivot.yMm)}">\n${lines}\n</div>`
+        : lines;
+      return `<div class="page">${guides}\n${body}\n</div>`;
     })
     .join('\n');
 
@@ -288,6 +308,7 @@ html,body{width:${mm(widthMm)};background:#fff}
 .page{position:relative;width:${mm(widthMm)};height:${mm(heightMm - 0.2)};overflow:hidden;break-after:page;page-break-after:always}
 .page:last-child{break-after:auto;page-break-after:auto}
 .l{position:absolute;white-space:pre;overflow:visible;color:#000}
+.r{position:absolute;left:0;top:0;width:100%;height:100%;transform:rotate(180deg)}
 .g{position:absolute;left:0;right:0;border-top:0.3pt dashed #999}
 </style></head><body>
 ${pages}

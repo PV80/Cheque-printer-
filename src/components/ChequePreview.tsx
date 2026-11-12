@@ -1,4 +1,4 @@
-import { FONT_STACKS, pageSizeMm, type ChequeLayout } from '../core/layout';
+import { chequePivotMm, FONT_STACKS, pageSizeMm, type ChequeLayout } from '../core/layout';
 import type { ChequeTemplate } from '../core/types';
 
 const PT_TO_MM = 25.4 / 72;
@@ -13,13 +13,40 @@ interface Props {
 /**
  * Draws a cheque layout on screen from exactly the same positions the
  * printer receives. Pre-printed parts of the cheque are not shown.
+ * A cheque printed upside down is drawn exactly as it is sent, then the whole
+ * sheet is turned so that it can be read.
  */
 export function ChequePreview({ layout, template, scale = 3.2 }: Props) {
   const { widthMm, heightMm } = pageSizeMm(template);
+  const pivot = chequePivotMm(template);
+  const lines = layout.fields.flatMap((field) =>
+    field.lines.map((line, i) => (
+      <div
+        key={`${field.key}-${i}`}
+        data-field={field.key}
+        style={{
+          position: 'absolute',
+          left: line.xMm * scale,
+          top: line.yMm * scale,
+          width: field.widthMm * scale,
+          height: field.lineHeightMm * scale,
+          lineHeight: `${field.lineHeightMm * scale}px`,
+          fontSize: field.fontPt * PT_TO_MM * scale,
+          fontFamily: FONT_STACKS[field.fontFamily],
+          fontWeight: field.fontWeight,
+          textAlign: field.align,
+          whiteSpace: 'pre',
+          color: field.overflow ? '#b91c1c' : '#000',
+        }}
+      >
+        {line.text}
+      </div>
+    ))
+  );
   return (
     <div
       className="relative bg-white border-2 border-gray-400 overflow-hidden"
-      style={{ width: widthMm * scale, height: heightMm * scale }}
+      style={{ width: widthMm * scale, height: heightMm * scale, transform: layout.rotated ? 'rotate(180deg)' : undefined }}
       data-testid="cheque-preview"
     >
       {template.pageTopOffset > 0 && (
@@ -32,29 +59,12 @@ export function ChequePreview({ layout, template, scale = 3.2 }: Props) {
           title="Blank part of the printer's sheet below the cheque"
         />
       )}
-      {layout.fields.flatMap((field) =>
-        field.lines.map((line, i) => (
-          <div
-            key={`${field.key}-${i}`}
-            data-field={field.key}
-            style={{
-              position: 'absolute',
-              left: line.xMm * scale,
-              top: line.yMm * scale,
-              width: field.widthMm * scale,
-              height: field.lineHeightMm * scale,
-              lineHeight: `${field.lineHeightMm * scale}px`,
-              fontSize: field.fontPt * PT_TO_MM * scale,
-              fontFamily: FONT_STACKS[field.fontFamily],
-              fontWeight: field.fontWeight,
-              textAlign: field.align,
-              whiteSpace: 'pre',
-              color: field.overflow ? '#b91c1c' : '#000',
-            }}
-          >
-            {line.text}
-          </div>
-        ))
+      {layout.rotated ? (
+        <div style={{ position: 'absolute', inset: 0, transform: 'rotate(180deg)', transformOrigin: `${pivot.xMm * scale}px ${pivot.yMm * scale}px` }}>
+          {lines}
+        </div>
+      ) : (
+        lines
       )}
     </div>
   );

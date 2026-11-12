@@ -45,6 +45,12 @@ export interface ChequeTemplate {
    * prints low. Unset = the sheet ends where the cheque ends.
    */
   sheetHeight?: number;
+  /**
+   * Print upside down: the leaf goes into the printer bottom edge first and the
+   * text is turned half a turn to match. Field positions and printer shifts are
+   * still given as the cheque is read.
+   */
+  rotate180?: boolean;
   fields: Record<FieldKey, FieldPosition>;
 }
 
