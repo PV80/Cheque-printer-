@@ -1,10 +1,10 @@
 import { Fragment, useMemo, useState } from 'react';
-import { ChevronDown, ChevronRight, Download, Search } from 'lucide-react';
+import { ChevronDown, ChevronRight, Download, Search, Share2, Upload } from 'lucide-react';
 import { formatMoney } from '../core/amount';
 import { can } from '../core/auth';
 import { formatDate, formatTimestamp, todayIso } from '../core/dates';
 import { activityCsv, registerCsv, signatureSummary } from '../core/register';
-import { logEvent, markSpoiled, revertPrinted } from '../core/store';
+import { logEvent, markSpoiled, mergeRegister, revertPrinted, shareRegister, StoreError } from '../core/store';
 import type { Cheque, ChequeStatus } from '../core/types';
 import { api } from '../platform/api';
 import { useApp } from '../state/AppContext';
@@ -21,7 +21,7 @@ const MAX_ROWS = 300;
 const stamp = formatTimestamp;
 
 export function RegisterTab() {
-  const { store, run, notify } = useApp();
+  const { store, user, run, notify } = useApp();
   const [view, setView] = useState<'cheques' | 'activity'>('cheques');
   const [search, setSearch] = useState('');
   const [companyId, setCompanyId] = useState('');
@@ -56,6 +56,49 @@ export function RegisterTab() {
     }
   }
 
+  // Each computer keeps its own register. These two pass the list of used
+  // cheques from one to another, so neither prints a number the other has used.
+  async function sendRegister() {
+    if (!user) return;
+    const share = shareRegister(store, user.displayName, new Date().toISOString());
+    const result = await api.saveFile({ defaultName: `cheques-used-${todayIso()}.json`, content: JSON.stringify(share), kind: 'json' });
+    if (result.saved) {
+      run((s, ctx) => logEvent(s, ctx, 'Sent register', `${share.cheques.length} used cheques — ${result.path ?? ''}`));
+      notify('success', `${share.cheques.length} used cheques saved to ${result.path}. Open that file on the other computer with "Receive from another computer".`);
+    }
+  }
+
+  async function receiveRegister() {
+    const file = await api.openJsonFile();
+    if (!file) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(file.content);
+    } catch {
+      return notify('error', `${file.name} could not be read.`);
+    }
+    let summary = '';
+    let clashes: string[] = [];
+    try {
+      const ok = run((s, ctx) => {
+        const result = mergeRegister(s, ctx, parsed);
+        clashes = result.clashes;
+        summary =
+          `${result.added} cheque${result.added === 1 ? '' : 's'} added as already used, ${result.known} already known here` +
+          (result.companiesAdded.length ? `. New companies: ${result.companiesAdded.join(', ')} — check their layout before printing` : '') +
+          '.';
+        return result.store;
+      });
+      if (!ok) return;
+    } catch (err) {
+      return notify('error', err instanceof StoreError ? err.message : 'That file could not be taken in.');
+    }
+    notify('success', `Register received: ${summary}`);
+    if (clashes.length) {
+      notify('error', `Cheque ${clashes.join(', ')} has been used on BOTH computers for different payments. Check those leaves now.`);
+    }
+  }
+
   return (
     <div className="max-w-6xl mx-auto py-6 px-4">
       <div className="flex items-center justify-between gap-4 mb-4">
@@ -64,6 +107,14 @@ export function RegisterTab() {
           <p className="text-sm text-gray-500">Every requisition loaded and what became of it.</p>
         </div>
         <div className="flex gap-2">
+          <Button onClick={() => void sendRegister()} data-testid="send-register" title="Save the cheques used on this computer to a file for another computer">
+            <Share2 size={14} /> Send to another computer
+          </Button>
+          {can(user, 'sync_register') && (
+            <Button onClick={() => void receiveRegister()} data-testid="receive-register" title="Take in the file another computer sent">
+              <Upload size={14} /> Receive from another computer
+            </Button>
+          )}
           <Button onClick={() => void exportCsv('register')} data-testid="export-register">
             <Download size={14} /> Export cheques (CSV)
           </Button>
@@ -191,7 +242,7 @@ export function RegisterTab() {
 }
 
 function Details({ cheque }: { cheque: Cheque }) {
-  const { store, user } = useApp();
+  const { store, user, notify } = useApp();
   const history = store.audit.filter((a) => a.chequeId === cheque.id);
   return (
     <div className="grid grid-cols-2 gap-6 text-sm">
@@ -201,12 +252,18 @@ function Details({ cheque }: { cheque: Cheque }) {
           {cheque.edited ? ' · details edited by hand' : ''}
         </p>
         {cheque.statusNote && <p className="text-gray-700">Note: {cheque.statusNote}</p>}
+        {cheque.receivedFrom && <p className="text-gray-700">Printed on another computer (register received from {cheque.receivedFrom}).</p>}
         <ul className="space-y-1">
           {cheque.requisitions.map((r) => (
             <li key={r.id} className="flex items-center gap-3 text-xs text-gray-600">
               <span className="truncate">{r.filename}</span>
               <span className="text-gray-400">loaded {stamp(r.importedAt)} by {r.importedByName}</span>
-              <button className="text-ncba-teal hover:underline shrink-0" onClick={() => void api.openPdf(r.fileHash)}>
+              <button
+                className="text-ncba-teal hover:underline shrink-0"
+                onClick={async () => {
+                  if (!(await api.openPdf(r.fileHash))) notify('info', 'The PDF for this requisition is not on this computer. It is kept on the computer that loaded it.');
+                }}
+              >
                 Open PDF
               </button>
             </li>

@@ -11,7 +11,7 @@ import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { _electron as electron } from 'playwright-core';
-import { makeImageOnlyPdf, makeReceiptPdf, makeRequisitionPdf, RECEIPT_SIGNATURE_BOX, SIGNATURE_BOX } from './fixtures.mjs';
+import { makeImageOnlyPdf, makeReceiptPdf, makeRequisitionPdf, NOTE_SIGNATURE_BOX, RECEIPT_SIGNATURE_BOX, SIGNATURE_BOX } from './fixtures.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '..');
@@ -52,19 +52,23 @@ async function fixture(name, options) {
   return file;
 }
 
-async function launch() {
+let lastPage = null; // for a screenshot if a step fails
+
+async function launch(dataDir = dirs.data, extraEnv = {}) {
   const app = await electron.launch({
     executablePath: require('electron'),
     // Containers and CI runners cannot start Chromium's sandbox.
     args: [root, ...(process.getuid?.() === 0 || process.env.CI ? ['--no-sandbox'] : [])],
     env: {
       ...process.env,
-      CHEQUE_PRINTER_DATA_DIR: dirs.data,
+      CHEQUE_PRINTER_DATA_DIR: dataDir,
       CHEQUE_PRINTER_E2E_PRINT_DIR: dirs.prints,
       CHEQUE_PRINTER_E2E_SAVE_DIR: dirs.saves,
+      ...extraEnv,
     },
   });
   const page = await app.firstWindow();
+  lastPage = page;
   page.setDefaultTimeout(20_000);
   page.on('pageerror', (e) => console.log(`  [page error] ${e.message}`));
   page.on('console', (m) => m.type() === 'error' && console.log(`  [console] ${m.text()}`));
@@ -111,12 +115,13 @@ const queueNumbers = (page, company) =>
 const heldIssues = (page, chq) =>
   page.locator(`[data-testid=held-list] > li[data-cheque="${chq}"] [data-issue]`).evaluateAll((els) => els.map((e) => e.dataset.issue));
 
-async function drawSignatureBox(page, area = SIGNATURE_BOX) {
-  const sheet = page.locator('[data-testid=zone-page]');
+async function drawSignatureBox(page, area = SIGNATURE_BOX, pageNumber = 1) {
+  const sheet = page.locator(`[data-testid=zone-page][data-page="${pageNumber}"]`);
+  await sheet.waitFor();
   await sheet.locator('img').evaluate((img) => img.complete || new Promise((r) => (img.onload = r)));
   await sheet.evaluate((el, middle) => {
-    const scroller = el.parentElement;
-    scroller.scrollTop = Math.max(0, el.offsetHeight * middle - scroller.clientHeight / 2);
+    const scroller = el.closest('[data-testid=zone-scroller]');
+    scroller.scrollTop = Math.max(0, el.offsetTop + el.offsetHeight * middle - scroller.clientHeight / 2);
   }, area.y + area.h / 2);
   const b = await sheet.boundingBox();
   const x0 = b.x + b.width * area.x;
@@ -182,12 +187,19 @@ async function main() {
     double123: await fixture('gi-123-double.pdf', { company: GI, payee: 'Paul Angalushe', chq: '000133', amount: '58,000/=', words: 'Fifty Eight Thousand Only', signature: 'drawn', details: 'Same payment again' }),
     receipt: join(dirs.pdfs, 'gi-receipt-122.pdf'),
     receiptUnsigned: join(dirs.pdfs, 'gi-receipt-121-unsigned.pdf'),
+    receiptPage2: join(dirs.pdfs, 'gi-receipt-119-two-pages.pdf'),
+    receiptPage2Unsigned: join(dirs.pdfs, 'gi-receipt-118-two-pages-unsigned.pdf'),
     notPdf: join(dirs.pdfs, 'not-a-pdf.pdf'),
     scan: join(dirs.pdfs, 'scan.pdf'),
   };
   // The accounts-system receipt: month-first date (5 June written 06/05/2026), cheque number on a wrapped line.
   writeFileSync(f.receipt, await makeReceiptPdf({ bank: 'I&M Bank', payee: 'JOHN SAMPLE PAYEE', date: '06/05/2026', amount: '59,000.00', chq: '122', signed: true }));
   writeFileSync(f.receiptUnsigned, await makeReceiptPdf({ bank: 'I&M Bank', payee: 'OTHER SAMPLE PAYEE', date: '06/05/2026', amount: '1,200.00', chq: '121', signed: false }));
+  // Long receipts whose approval lines fall on a second page.
+  writeFileSync(f.receiptPage2, await makeReceiptPdf({ bank: 'I&M Bank', payee: 'LONG RECEIPT PAYEE', date: '06/05/2026', amount: '7,700.00', chq: '119', signed: true, approvalOnPage2: true }));
+  writeFileSync(f.receiptPage2Unsigned, await makeReceiptPdf({ bank: 'I&M Bank', payee: 'LONG UNSIGNED PAYEE', date: '06/05/2026', amount: '8,800.00', chq: '118', signed: false, approvalOnPage2: true }));
+  // A voucher signed only on its second page, the requisition note.
+  f.noteSigned = await fixture('gi-150-signed-on-note.pdf', { company: GI, payee: 'Note Signer Ltd', chq: '000150', amount: '4,000/=', words: 'Four Thousand Only', note: 'signed' });
   writeFileSync(f.notPdf, 'this is not a pdf');
   writeFileSync(f.scan, await makeImageOnlyPdf());
 
@@ -478,12 +490,79 @@ async function main() {
   check((await receiptInQueue.innerText()).includes('05/06/2026'), 'month-first date 06/05/2026 is read as 5 June');
   check((await receiptInQueue.innerText()).includes('59,000.00'), 'payment amount is read from the receipt');
   checkEqual((await queueNumbers(page, GI))[0], '122', 'a cheque number wrapped on to the next line is read, and sorts first');
+
+  step('A signature on a later page');
+  results = await load(page, [f.receiptPage2, f.receiptPage2Unsigned, f.noteSigned]);
+  checkEqual(results.map((r) => r.state), ['queued', 'held', 'held'], 'a receipt signed on page two is found: its box follows the words APPROVED BY');
+  check(results[1].text.includes('not signed'), 'the same receipt unsigned on page two is held');
+  check(results[2].text.includes('not signed'), 'a voucher signed only on its page-two note is held at first');
+  await tab(page, 'held');
+  const noteRow = page.locator('[data-testid=held-list] > li[data-cheque="000150"]');
+  await noteRow.locator('[data-testid=zone-fix]').click();
+  check((await page.locator('[data-testid=zone-page-count]').innerText()).startsWith('2 pages'), 'the signature-box screen shows every page of the requisition');
+  await page.locator('[data-testid=zone-page][data-page="2"]').waitFor();
+  checkEqual(await verdict(page), false, 'the existing box, on page one, finds no signature');
+  await drawSignatureBox(page, NOTE_SIGNATURE_BOX, 2);
+  checkEqual(await verdict(page), true, 'a second box drawn on page two finds it');
+  await shot(page, '05-second-page-box');
+  await page.click('[data-testid=zone-save]');
+  await noteRow.waitFor({ state: 'detached' });
+  checkEqual(await heldIssues(page, '118'), ['unsigned'], 'the unsigned two-page receipt is still held');
+  check(await page.locator('[data-testid=held-list] > li[data-cheque="118"] [data-testid=zone-fix]').isVisible(), 'an administrator can open the signature box from a held requisition');
+  await tab(page, 'queue');
+  const giQueue = await queueNumbers(page, GI);
+  check(giQueue.includes('119') && giQueue.includes('000150'), 'both requisitions signed on page two are now queued');
+  check(giQueue.includes('000128'), 'vouchers signed on page one still pass with two boxes saved');
+
+  step('Send the register to another computer');
+  await tab(page, 'register');
+  await page.click('[data-testid=send-register]');
+  await page.getByText('used cheques saved to').waitFor();
+  const shareFile = join(dirs.saves, readdirSync(dirs.saves).find((n) => n.startsWith('cheques-used')));
+  const shared = JSON.parse(readFileSync(shareFile, 'utf8'));
+  check(shared.cheques.every((c) => c.status === 'printed' || c.status === 'spoiled'), 'only printed and spoiled cheques are sent');
+  check(shared.cheques.some((c) => c.chequeNumber === '000123'), 'the printed cheque is in the file');
+
+  step('Clear the print queue');
+  await tab(page, 'queue');
+  page.once('dialog', (d) => d.accept());
+  await page.locator(`section[data-company="${SH}"] [data-testid=clear-company]`).click();
+  await page.locator(`section[data-company="${SH}"]`).waitFor({ state: 'detached' });
+  check((await queueNumbers(page, GI)).length > 0, 'clearing one company leaves the others alone');
+  page.once('dialog', (d) => d.accept());
+  await page.click('[data-testid=clear-all]');
+  await page.getByText('The print queue is empty.').waitFor();
+  await tab(page, 'register');
+  reg = await register();
+  checkEqual([reg['000501 (discarded)'], reg['000123']], ['cancelled', 'printed'], 'cleared cheques are kept as discarded; printed ones are untouched');
+  await app.close();
+
+  step('A second computer takes the register in');
+  ({ app, page } = await launch(join(tmp, 'data-second-computer'), { CHEQUE_PRINTER_E2E_OPEN_FILE: shareFile }));
+  await page.getByLabel('Your name').fill('Second');
+  await page.getByLabel('Username', { exact: true }).fill('second');
+  await page.getByLabel('Password', { exact: true }).fill(PASSWORD);
+  await page.getByLabel('Password again').fill(PASSWORD);
+  await page.getByRole('button', { name: 'Create administrator account' }).click();
+  await tab(page, 'register');
+  await page.click('[data-testid=receive-register]');
+  await page.getByText('Register received').waitFor();
+  reg = await register();
+  checkEqual([reg['000123'], reg['000124'], reg['000500']], ['printed', 'spoiled', 'printed'], 'cheques used on the first computer are now recorded here');
+  results = await load(page, [f.gi123, f.reuse123]);
+  checkEqual(results.map((r) => r.state), ['skipped', 'held'], 'nothing already used on the other computer can be loaded for printing here');
+  check(results[0].text.includes('Already printed as cheque 000123'), 'the very same requisition is recognised as already printed');
+  check(results[1].text.includes('already printed') && results[1].text.includes('cannot be used twice'), 'a different requisition for that cheque number is held');
+  await tab(page, 'queue');
+  await page.getByText('The print queue is empty.').waitFor();
+  check(true, 'nothing reaches this computer\'s print queue');
   await app.close();
 
   console.log(`\nAll ${passed} checks passed.`);
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
+  await lastPage?.screenshot({ path: join(dirs.shots, 'failure.png') }).catch(() => undefined);
   console.error(`\n${err.stack ?? err}`);
   console.error(`\nScreenshots, data and captured prints are in ${tmp}`);
   process.exit(1);

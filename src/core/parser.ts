@@ -381,7 +381,11 @@ export function parseRequisition(pages: string[][], options: ParseOptions = {}):
 
   const otherRequisitionPages: number[] = [];
   pages.forEach((pageLines, index) => {
-    if (index > 0 && pageLines.some((l) => REQUISITION_TITLE.test(l))) otherRequisitionPages.push(index + 1);
+    // A second requisition has its own heading and its own payee. A receipt that
+    // simply runs on to another page has neither.
+    const hasTitle = pageLines.some((l) => REQUISITION_TITLE.test(l));
+    const hasPayee = pageLines.some((l) => labelValues(l).some((v) => v.key === 'payee' && v.value));
+    if (index > 0 && hasTitle && hasPayee) otherRequisitionPages.push(index + 1);
   });
 
   return {

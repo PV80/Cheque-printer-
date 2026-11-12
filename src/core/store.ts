@@ -146,7 +146,7 @@ function sanitizeZone(raw: unknown): SignatureZone | null {
   const w = num(raw.w, 0);
   const h = num(raw.h, 0);
   if (x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > 1.0001 || y + h > 1.0001) return null;
-  return {
+  const zone: SignatureZone = {
     page: Math.max(1, Math.round(num(raw.page, 1))),
     x,
     y,
@@ -154,14 +154,21 @@ function sanitizeZone(raw: unknown): SignatureZone | null {
     h,
     ignoreTypedText: raw.ignoreTypedText !== false,
   };
+  if (isObject(raw.anchor) && typeof raw.anchor.text === 'string' && raw.anchor.text.trim()) {
+    zone.anchor = { text: raw.anchor.text.trim().toLowerCase(), dx: num(raw.anchor.dx, 0), dy: num(raw.anchor.dy, 0) };
+  }
+  return zone;
 }
 
 function sanitizeZones(raw: unknown): CompanyProfile['signatureZones'] {
   const zones: CompanyProfile['signatureZones'] = {};
   if (!isObject(raw)) return zones;
   for (const type of FORM_TYPES) {
-    const zone = sanitizeZone(raw[type]);
-    if (zone) zones[type] = zone;
+    // Earlier versions kept a single box per form.
+    const list = (Array.isArray(raw[type]) ? raw[type] : [raw[type]])
+      .map(sanitizeZone)
+      .filter((z): z is SignatureZone => z !== null);
+    if (list.length) zones[type] = list;
   }
   return zones;
 }
@@ -626,6 +633,11 @@ export function cancelCheque(store: Store, ctx: Ctx, id: string, note: string): 
   );
 }
 
+/** Clears several waiting requisitions at once, e.g. a company's whole print queue. */
+export function cancelCheques(store: Store, ctx: Ctx, ids: string[], note: string): Store {
+  return ids.reduce((next, id) => cancelCheque(next, ctx, id, note), store);
+}
+
 /**
  * Two requisitions that are paid by one cheque: `mergeId` is folded into
  * `keepId` and the amounts are added together.
@@ -781,6 +793,137 @@ export function reconcileRestore(current: Store, restored: Store): Store {
       ...used.filter((c) => !restoredIds.has(c.id)),
     ],
   };
+}
+
+// ---- Sharing the register between computers ------------------------------------------
+//
+// Each computer keeps its own register. So that one computer knows which
+// cheque numbers another has already used, the register of used cheques can
+// be saved to a file on one and taken in on the other.
+
+export interface RegisterShare {
+  type: 'cheque-printer-register';
+  version: 1;
+  sharedAt: string;
+  sharedBy: string;
+  companies: CompanyProfile[];
+  cheques: Cheque[];
+}
+
+const isUsed = (c: Cheque) => c.status === 'printed' || c.status === 'spoiled';
+
+/** Every cheque printed or spoiled on this computer, with the companies they belong to. */
+export function shareRegister(store: Store, sharedBy: string, now: string): RegisterShare {
+  const cheques = store.cheques.filter((c) => isUsed(c) && c.companyId);
+  const companyIds = new Set(cheques.map((c) => c.companyId));
+  return {
+    type: 'cheque-printer-register',
+    version: 1,
+    sharedAt: now,
+    sharedBy,
+    companies: store.companies.filter((c) => companyIds.has(c.id)),
+    cheques,
+  };
+}
+
+export interface RegisterMergeResult {
+  store: Store;
+  added: number; // used cheques this computer did not know about
+  known: number; // already recorded here
+  companiesAdded: string[];
+  /** Cheque numbers both computers have used, for different payments. */
+  clashes: string[];
+}
+
+function sanitizeSharedCheque(raw: unknown): Cheque | null {
+  if (!isObject(raw) || typeof raw.id !== 'string' || typeof raw.chequeNumber !== 'string') return null;
+  if (raw.status !== 'printed' && raw.status !== 'spoiled') return null;
+  const text = (v: unknown) => (typeof v === 'string' ? v : '');
+  return {
+    id: raw.id,
+    companyId: typeof raw.companyId === 'string' ? raw.companyId : null,
+    companyRaw: text(raw.companyRaw),
+    chequeNumber: raw.chequeNumber,
+    payee: text(raw.payee),
+    date: text(raw.date),
+    amountCents: Number.isSafeInteger(raw.amountCents) ? (raw.amountCents as number) : 0,
+    requisitions: (Array.isArray(raw.requisitions) ? raw.requisitions.filter(isObject) : []) as unknown as Requisition[],
+    status: raw.status,
+    statusNote: text(raw.statusNote),
+    edited: raw.edited === true,
+    amountConfirmed: raw.amountConfirmed === true,
+    overrides: (Array.isArray(raw.overrides) ? raw.overrides.filter(isObject) : []) as unknown as Cheque['overrides'],
+    createdAt: text(raw.createdAt),
+    ...(typeof raw.printedAt === 'string' ? { printedAt: raw.printedAt } : {}),
+    ...(typeof raw.printedByName === 'string' ? { printedByName: raw.printedByName } : {}),
+  };
+}
+
+/**
+ * Takes in another computer's used cheques. Their numbers then count as used
+ * here too: a requisition for one of them is held, and the queue knows where
+ * that company's cheque book has got to. Nothing already recorded here is changed.
+ */
+export function mergeRegister(store: Store, ctx: Ctx, raw: unknown): RegisterMergeResult {
+  requirePermission(ctx, 'sync_register');
+  if (!isObject(raw) || raw.type !== 'cheque-printer-register' || !Array.isArray(raw.cheques)) {
+    throw new StoreError('That file is not a register shared from Cheque Printer.');
+  }
+  const from = `${typeof raw.sharedBy === 'string' && raw.sharedBy ? raw.sharedBy : 'another computer'}, ${
+    typeof raw.sharedAt === 'string' ? formatDate(raw.sharedAt.slice(0, 10)) : 'date unknown'
+  }`;
+
+  // Match the other computer's companies to ours by name; bring over any we do not have, layout included.
+  let companies = store.companies;
+  const companiesAdded: string[] = [];
+  const localId = new Map<string, string>();
+  for (const item of Array.isArray(raw.companies) ? raw.companies : []) {
+    const theirs = sanitizeCompany(item);
+    if (!theirs || !theirs.id) continue;
+    const ours =
+      companies.find((c) => c.id === theirs.id) ??
+      [theirs.name, ...theirs.aliases].map((n) => matchCompany(n, companies)).find((c) => c !== null);
+    if (ours) {
+      localId.set(theirs.id, ours.id);
+    } else if (!findNameConflict(theirs, companies)) {
+      companies = [...companies, theirs];
+      companiesAdded.push(theirs.name);
+      localId.set(theirs.id, theirs.id);
+    }
+  }
+
+  let cheques = store.cheques;
+  let added = 0;
+  let known = 0;
+  const clashes: string[] = [];
+  for (const item of raw.cheques) {
+    const theirs = sanitizeSharedCheque(item);
+    const companyId = theirs?.companyId ? localId.get(theirs.companyId) : undefined;
+    if (!theirs || !companyId) continue;
+    const number = normaliseChequeNumber(theirs.chequeNumber);
+
+    const sameRecord = cheques.find((c) => c.id === theirs.id);
+    const sameLeaf = cheques.find((c) => c.id !== theirs.id && c.companyId === companyId && isUsed(c) && normaliseChequeNumber(c.chequeNumber) === number);
+    if (sameRecord && isUsed(sameRecord)) {
+      known++;
+    } else if (sameLeaf) {
+      known++;
+      // The same leaf number used on both computers for different payments: someone needs to look.
+      if (normalisePayee(sameLeaf.payee) !== normalisePayee(theirs.payee) || sameLeaf.amountCents !== theirs.amountCents) {
+        clashes.push(theirs.chequeNumber);
+      }
+    } else {
+      const record: Cheque = { ...theirs, companyId, receivedFrom: from };
+      cheques = sameRecord ? cheques.map((c) => (c.id === theirs.id ? record : c)) : [...cheques, record];
+      added++;
+    }
+  }
+
+  const details =
+    `from ${from}: ${added} added, ${known} already known` +
+    (companiesAdded.length ? `, companies added: ${companiesAdded.join(', ')}` : '') +
+    (clashes.length ? `, CLASH on cheque ${clashes.join(', ')}` : '');
+  return { store: withLog({ ...store, companies, cheques }, ctx, 'Received register', details), added, known, companiesAdded, clashes };
 }
 
 /** Undo "printed" when the leaf was never actually used. */

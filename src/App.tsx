@@ -122,7 +122,7 @@ function Shell() {
         </div>
       )}
 
-      <div className="fixed bottom-4 right-4 z-[70] space-y-2 w-96 max-w-[calc(100vw-2rem)]">
+      <div className="fixed bottom-4 left-4 z-[70] space-y-2 w-96 max-w-[calc(100vw-2rem)]">
         {toasts.map((t) => (
           <div key={t.id} role="status" className={`flex items-start gap-3 rounded-lg shadow-lg px-4 py-3 text-sm ${TOAST_STYLE[t.kind]}`}>
             <span className="flex-1">{t.text}</span>

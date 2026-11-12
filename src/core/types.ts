@@ -51,6 +51,12 @@ export interface SignatureZone {
   w: number;
   h: number;
   ignoreTypedText: boolean;
+  /**
+   * The printed words the box sits beside (e.g. "approved by"), and where the
+   * box is relative to them. When set, the box follows those words if they
+   * move down the page or land on another page.
+   */
+  anchor?: { text: string; dx: number; dy: number };
 }
 
 export interface CompanyProfile {
@@ -63,8 +69,11 @@ export interface CompanyProfile {
   printerOffsetX: number; // mm
   printerOffsetY: number; // mm
   template: ChequeTemplate;
-  /** One signature box per kind of requisition form this company uses. */
-  signatureZones: Partial<Record<DocumentType, SignatureZone>>;
+  /**
+   * Signature boxes for each kind of requisition form this company uses. A
+   * form may be signed in more than one place; a signature in any box counts.
+   */
+  signatureZones: Partial<Record<DocumentType, SignatureZone[]>>;
   loadingNote: string; // shown to whoever loads the cheques, e.g. "Face up, top edge first"
 }
 
@@ -133,6 +142,8 @@ export interface Cheque {
   amountConfirmed: boolean; // a supervisor confirmed the amount after a words/figures mismatch
   overrides: Override[];
   createdAt: string;
+  /** Set when this record came from another computer's shared register. */
+  receivedFrom?: string;
   /** Handed to the printer, but what came out has not been recorded yet. */
   printSentAt?: string;
   printedAt?: string;

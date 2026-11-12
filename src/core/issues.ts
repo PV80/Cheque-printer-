@@ -153,7 +153,7 @@ export function createIssueChecker(store: Store, measure?: Measure): (cheque: Ch
     if (company) {
       const open = cheque.requisitions.filter((r) => r.signature.status !== 'signed' && !isReleased(cheque, r));
       const unsigned = open.filter((r) => r.signature.status === 'not_signed');
-      const noBox = open.find((r) => r.signature.status === 'unchecked' && !company.signatureZones[r.documentType]);
+      const noBox = open.find((r) => r.signature.status === 'unchecked' && !company.signatureZones[r.documentType]?.length);
       if (unsigned.length || cheque.requisitions.length === 0) {
         issues.push({
           kind: 'unsigned',

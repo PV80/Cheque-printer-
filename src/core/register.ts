@@ -66,7 +66,7 @@ export function registerCsv(store: Store): string {
     cell(stamp(c.printedAt)),
     cell(c.printedByName ?? ''),
     cell(c.edited ? 'Yes' : ''),
-    cell(c.statusNote),
+    cell([c.statusNote, c.receivedFrom ? `Received from ${c.receivedFrom}` : ''].filter(Boolean).join(' — ')),
   ]);
 
   return toCsv([header, ...rows]);

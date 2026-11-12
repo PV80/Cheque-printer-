@@ -246,7 +246,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
       for (const req of cheque.requisitions) {
         const zone = zones[req.documentType];
-        if (req.signature.status !== 'unchecked' || !zone) continue;
+        if (req.signature.status !== 'unchecked' || !zone?.length) continue;
         const zoneKey = JSON.stringify(zone);
         const key = `${req.id}|${zoneKey}`;
         if (checking.current.has(key)) continue;

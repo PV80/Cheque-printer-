@@ -9,7 +9,7 @@ import type { Requisition, SignatureResult, SignatureZone, Store, User } from '.
 
 import { api } from '../platform/api';
 import { measureText } from '../platform/measure';
-import { checkSignature, extractPages, looksLikePdf, openPdf, producedOn, sha256Hex, type PdfDocument } from '../platform/pdf';
+import { checkSignatureBoxes, extractPages, looksLikePdf, openPdf, producedOn, sha256Hex, type PdfDocument } from '../platform/pdf';
 
 export type ImportState = 'working' | 'queued' | 'held' | 'skipped' | 'error';
 
@@ -26,8 +26,8 @@ export interface ImportDeps {
 
 const MAX_PDF_BYTES = 50 * 1024 * 1024;
 
-export async function signatureResult(pdf: PdfDocument, zone: SignatureZone): Promise<SignatureResult> {
-  const ink = await checkSignature(pdf, zone);
+export async function signatureResult(pdf: PdfDocument, zones: SignatureZone[]): Promise<SignatureResult> {
+  const ink = await checkSignatureBoxes(pdf, zones);
   return {
     status: ink.signed ? 'signed' : 'not_signed',
     inkMm2: ink.inkMm2,
@@ -85,7 +85,7 @@ export async function importPdfFile(file: File, deps: ImportDeps): Promise<Impor
 
     const company = matchCompany(parsed.companyRaw, deps.getStore().companies);
     const zone = company?.signatureZones[parsed.documentType];
-    let signature: SignatureResult = zone ? await signatureResult(pdf, zone) : { status: 'unchecked' };
+    let signature: SignatureResult = zone?.length ? await signatureResult(pdf, zone) : { status: 'unchecked' };
 
     await api.savePdf(fileHash, bytes);
 

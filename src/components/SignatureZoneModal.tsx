@@ -1,12 +1,22 @@
 import { useEffect, useRef, useState, type MouseEvent } from 'react';
-import { CheckCircle, FileUp, XCircle } from 'lucide-react';
+import { CheckCircle, FileUp, Trash2, XCircle } from 'lucide-react';
 import { FORM_LABELS } from '../core/company';
 import { parseRequisition } from '../core/parser';
 import { SIGNATURE_MINIMUM, type InkAnalysis } from '../core/signature';
 import { saveCompany } from '../core/store';
 import type { DocumentType, SignatureZone } from '../core/types';
 import { api } from '../platform/api';
-import { checkSignature, extractPages, looksLikePdf, openPdf, renderPage, type PdfDocument } from '../platform/pdf';
+import {
+  checkSignature,
+  chooseAnchor,
+  extractPages,
+  locateZone,
+  looksLikePdf,
+  openPdf,
+  renderPage,
+  type LocatedZone,
+  type PdfDocument,
+} from '../platform/pdf';
 import { useApp } from '../state/AppContext';
 import { Button, Modal, Notice } from './ui';
 
@@ -17,18 +27,22 @@ interface Props {
   onClose: () => void;
 }
 
-interface Box {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
+const MIN_BOX = 0.015;
+const MAX_PAGES = 8;
+
+interface Reading {
+  at: LocatedZone; // where the box sits on the sample that is open
+  result: InkAnalysis;
 }
 
-const MIN_BOX = 0.015;
+const followsText = (zone: SignatureZone) =>
+  zone.anchor ? `follows the words "${zone.anchor.text}", on any page` : `fixed place on page ${zone.page}`;
 
 /**
- * Teaches the app where the approver signs on a company's requisition form:
- * draw a box on a sample, and see at once whether that sample reads as signed.
+ * Teaches the app where the approver signs on one kind of form: draw a box on
+ * a sample and see at once whether that sample reads as signed. A form can
+ * have several boxes (for example page one, or the note on page two); a
+ * signature in any of them counts.
  */
 export function SignatureZoneModal({ companyId, fileHash, onClose }: Props) {
   const { store, run, notify } = useApp();
@@ -36,20 +50,33 @@ export function SignatureZoneModal({ companyId, fileHash, onClose }: Props) {
 
   const [pdf, setPdf] = useState<PdfDocument | null>(null);
   const [sampleName, setSampleName] = useState('');
-  const [pageNumber, setPageNumber] = useState(1);
-  const [image, setImage] = useState('');
-  const [box, setBox] = useState<Box | null>(null);
-  // A company can use more than one kind of form, signed in different places:
-  // the box is kept per kind, worked out from the sample that is open.
+  const [pages, setPages] = useState<string[]>([]);
   const [formType, setFormType] = useState<DocumentType | null>(null);
-  const [borrowed, setBorrowed] = useState(false);
   const formTypeRef = useRef<DocumentType | null>(null);
+
+  // Boxes kept for this kind of form, and what each reads on the open sample.
+  const [zones, setZones] = useState<SignatureZone[]>([]);
+  const [readings, setReadings] = useState<(Reading | null)[]>([]);
+
+  // The box being drawn now.
+  const [draft, setDraft] = useState<LocatedZone | null>(null);
+  const [draftZone, setDraftZone] = useState<SignatureZone | null>(null);
+  const draftZoneRef = useRef<SignatureZone | null>(null);
+  const [draftResult, setDraftResult] = useState<InkAnalysis | null>(null);
+  const dragStart = useRef<{ page: number; x: number; y: number } | null>(null);
+
   const [ignoreTypedText, setIgnoreTypedText] = useState(true);
-  const [verdict, setVerdict] = useState<InkAnalysis | null>(null);
+  const [borrowed, setBorrowed] = useState(false);
+  const [changed, setChanged] = useState(false);
   const [error, setError] = useState('');
-  const dragStart = useRef<{ x: number; y: number } | null>(null);
-  const pageRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  function clearDraft() {
+    setDraft(null);
+    setDraftZone(null);
+    draftZoneRef.current = null;
+    setDraftResult(null);
+  }
 
   async function load(bytes: Uint8Array, name: string) {
     setError('');
@@ -58,21 +85,23 @@ export function SignatureZoneModal({ companyId, fileHash, onClose }: Props) {
       const doc = await openPdf(bytes);
       const type = parseRequisition(await extractPages(doc)).documentType;
       if (type !== formTypeRef.current) {
-        // A different kind of form: start from the box saved for it, or one
-        // another company already uses for the same form, as a suggestion.
-        const own = company?.signatureZones[type];
-        const other = own ? undefined : store.companies.map((c) => c.signatureZones[type]).find((z) => !!z);
-        const zone = own ?? other;
+        // A different kind of form: start from the boxes saved for it, or the
+        // ones another company already uses for the same form, as a suggestion.
+        const own = company?.signatureZones[type] ?? [];
+        const other = own.length ? [] : store.companies.map((c) => c.signatureZones[type] ?? []).find((z) => z.length > 0) ?? [];
         formTypeRef.current = type;
         setFormType(type);
-        setBorrowed(!own && !!other);
-        setBox(zone ? { x: zone.x, y: zone.y, w: zone.w, h: zone.h } : null);
-        setIgnoreTypedText(zone?.ignoreTypedText ?? true);
-        setPageNumber(Math.min(Math.max(1, zone?.page ?? 1), doc.numPages));
-      } else {
-        setPageNumber((p: number) => Math.min(Math.max(1, p), doc.numPages));
+        setZones(own.length ? own : other);
+        setBorrowed(own.length === 0 && other.length > 0);
+        setChanged(own.length === 0 && other.length > 0);
+        clearDraft();
+      } else if (draftZoneRef.current) {
+        // Same kind of form: carry the box being drawn over to the new sample.
+        setDraft(await locateZone(doc, draftZoneRef.current));
+        setDraftResult(null);
       }
-      setVerdict(null);
+      setReadings([]);
+      setPages([]);
       setPdf(doc); // the previous sample is released by the effect below
       setSampleName(name);
     } catch {
@@ -90,99 +119,150 @@ export function SignatureZoneModal({ companyId, fileHash, onClose }: Props) {
 
   useEffect(() => () => void pdf?.destroy(), [pdf]);
 
-  // Draw the chosen page.
+  // Draw every page, one under another.
   useEffect(() => {
     if (!pdf) return;
     let cancelled = false;
-    renderPage(pdf, pageNumber, 1.5)
-      .then(({ canvas }) => {
-        if (!cancelled) setImage(canvas.toDataURL('image/png'));
-      })
-      .catch(() => undefined); // the sample was swapped while drawing
+    void (async () => {
+      const images: string[] = [];
+      for (let n = 1; n <= Math.min(pdf.numPages, MAX_PAGES) && !cancelled; n++) {
+        try {
+          images.push((await renderPage(pdf, n, 1.5)).canvas.toDataURL('image/png'));
+        } catch {
+          return; // the sample was swapped while drawing
+        }
+        if (!cancelled) setPages([...images]);
+      }
+    })();
     return () => {
       cancelled = true;
     };
-  }, [pdf, pageNumber]);
+  }, [pdf]);
 
-  // Re-read the box whenever it, the sample or the options change.
+  // Read each saved box on the open sample.
   useEffect(() => {
-    if (!pdf || !box || dragStart.current) return;
+    if (!pdf) return;
     let cancelled = false;
-    setVerdict(null);
-    const zone: SignatureZone = { page: pageNumber, ...box, ignoreTypedText };
-    checkSignature(pdf, zone)
-      .then((result) => {
-        if (!cancelled) setVerdict(result);
+    setReadings(zones.map(() => null));
+    zones.forEach((zone, i) => {
+      Promise.all([locateZone(pdf, zone), checkSignature(pdf, zone)])
+        .then(([at, result]) => {
+          if (!cancelled) setReadings((r) => r.map((old, j) => (j === i ? { at, result } : old)));
+        })
+        .catch(() => undefined);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [pdf, zones]);
+
+  // Read the box being drawn, and find the label it should follow.
+  useEffect(() => {
+    if (!pdf || !draft || dragStart.current) return;
+    let cancelled = false;
+    setDraftResult(null);
+    const absolute: SignatureZone = { ...draft, ignoreTypedText };
+    Promise.all([checkSignature(pdf, absolute), chooseAnchor(pdf, draft)])
+      .then(([result, anchor]) => {
+        if (cancelled) return;
+        const zone: SignatureZone = anchor ? { ...absolute, anchor } : absolute;
+        draftZoneRef.current = zone;
+        setDraftZone(zone);
+        setDraftResult(result);
       })
       .catch(() => undefined);
     return () => {
       cancelled = true;
     };
-  }, [pdf, pageNumber, box, ignoreTypedText]);
+  }, [pdf, draft, ignoreTypedText]);
 
-  function pointer(e: MouseEvent): { x: number; y: number } {
-    const rect = pageRef.current!.getBoundingClientRect();
+  function pointer(e: MouseEvent<HTMLDivElement>): { x: number; y: number } {
+    const rect = e.currentTarget.getBoundingClientRect();
     return {
       x: Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width)),
       y: Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height)),
     };
   }
 
-  function onMouseDown(e: MouseEvent) {
+  function onMouseDown(e: MouseEvent<HTMLDivElement>, page: number) {
     e.preventDefault();
-    dragStart.current = pointer(e);
-    setVerdict(null);
+    const p = pointer(e);
+    dragStart.current = { page, ...p };
     setBorrowed(false);
-    setBox({ ...dragStart.current, w: 0, h: 0 });
+    setDraftResult(null);
+    setDraft({ page, ...p, w: 0, h: 0 });
   }
 
-  function onMouseMove(e: MouseEvent) {
+  function onMouseMove(e: MouseEvent<HTMLDivElement>, page: number) {
     const start = dragStart.current;
-    if (!start) return;
+    if (!start || start.page !== page) return;
     const p = pointer(e);
-    setBox({ x: Math.min(start.x, p.x), y: Math.min(start.y, p.y), w: Math.abs(p.x - start.x), h: Math.abs(p.y - start.y) });
+    setDraft({ page, x: Math.min(start.x, p.x), y: Math.min(start.y, p.y), w: Math.abs(p.x - start.x), h: Math.abs(p.y - start.y) });
   }
 
   function onMouseUp() {
     if (!dragStart.current) return;
     dragStart.current = null;
-    setBox((b) => (b && b.w >= MIN_BOX && b.h >= MIN_BOX ? { ...b } : null));
+    setDraft((d) => {
+      if (d && d.w >= MIN_BOX && d.h >= MIN_BOX) {
+        setChanged(true);
+        return { ...d };
+      }
+      draftZoneRef.current = null;
+      setDraftZone(null);
+      return null;
+    });
+  }
+
+  function removeZone(index: number) {
+    setZones((z) => z.filter((_, i) => i !== index));
+    setBorrowed(false);
+    setChanged(true);
   }
 
   function save() {
-    if (!company || !box || !formType) return;
-    const zone: SignatureZone = { page: pageNumber, ...box, ignoreTypedText };
+    if (!company || !formType) return;
+    const next = [...zones, ...(draftZone ? [{ ...draftZone, ignoreTypedText }] : [])];
     const ok = run((s, ctx) => {
       const latest = s.companies.find((c) => c.id === company.id);
-      return latest ? saveCompany(s, ctx, { ...latest, signatureZones: { ...latest.signatureZones, [formType]: zone } }) : s;
+      return latest ? saveCompany(s, ctx, { ...latest, signatureZones: { ...latest.signatureZones, [formType]: next } }) : s;
     });
     if (ok) {
-      notify('success', `Signature box saved for ${company.name} — ${FORM_LABELS[formType]}. Waiting requisitions are being re-checked.`);
+      notify('success', `Signature ${next.length === 1 ? 'box' : 'boxes'} saved for ${company.name} — ${FORM_LABELS[formType]}. Waiting requisitions are being re-checked.`);
       onClose();
     }
   }
 
   if (!company) return null;
 
+  // What the sample reads as, taking every box together.
+  const results = [...readings.map((r) => r?.result ?? null), ...(draft ? [draftResult] : [])];
+  const waiting = results.some((r) => r === null);
+  const signedOne = results.find((r) => r?.signed);
+  const fullest = results.reduce<InkAnalysis | null>((a, b) => (b && (!a || b.inkMm2 > a.inkMm2) ? b : a), null);
+  const shown = signedOne ?? fullest;
+  const verdict = results.length === 0 ? 'none' : waiting ? 'pending' : signedOne ? 'true' : 'false';
+  const canSave = !!pdf && !!formType && changed && !(draft && !draftZone);
+
   return (
     <Modal
-      title={`Signature box — ${company.name}`}
+      title={`Signature boxes — ${company.name}`}
       onClose={onClose}
       wide
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" onClick={save} disabled={!box || !pdf || !formType} data-testid="zone-save">
-            Save signature box
+          <Button variant="primary" onClick={save} disabled={!canSave} data-testid="zone-save">
+            Save
           </Button>
         </>
       }
     >
       <div className="space-y-4">
         <Notice tone="blue">
-          <strong>1.</strong> Open a requisition for this company. <strong>2.</strong> Drag a box around the empty space where
-          the approver signs — leave out printed labels where you can. <strong>3.</strong> Test both a signed and an unsigned
-          copy: the unsigned one must read <em>Not signed</em>.
+          <strong>1.</strong> Open a requisition for this company. <strong>2.</strong> Scroll to where the approver signs — on
+          any page — and drag a box around it. The typed name and the underline can be inside the box. <strong>3.</strong> Try
+          an unsigned copy too: it must read <em>Not signed</em>.
         </Notice>
 
         <div className="flex flex-wrap items-center gap-3">
@@ -207,36 +287,21 @@ export function SignatureZoneModal({ companyId, fileHash, onClose }: Props) {
               {FORM_LABELS[formType]}
             </span>
           )}
-          {pdf && pdf.numPages > 1 && (
-            <label className="text-xs text-gray-600 flex items-center gap-2">
-              Page
-              <select
-                className="border rounded px-2 py-1"
-                value={pageNumber}
-                onChange={(e) => {
-                  setPageNumber(Number(e.target.value));
-                  setBox(null);
-                }}
-              >
-                {Array.from({ length: pdf.numPages }, (_, i) => (
-                  <option key={i} value={i + 1}>
-                    {i + 1}
-                  </option>
-                ))}
-              </select>
-            </label>
+          {pdf && (
+            <span className="text-xs text-gray-500" data-testid="zone-page-count">
+              {pdf.numPages === 1 ? '1 page' : `${pdf.numPages} pages — scroll down for the rest`}
+            </span>
           )}
           <label className="text-xs text-gray-600 flex items-center gap-2">
             <input type="checkbox" checked={ignoreTypedText} onChange={(e) => setIgnoreTypedText(e.target.checked)} />
-            Ignore typed text inside the box (a typed name is not a signature)
+            Ignore typed text inside a new box (a typed name is not a signature)
           </label>
         </div>
 
         {error && <Notice tone="red">{error}</Notice>}
-        {borrowed && box && (
+        {borrowed && zones.length > 0 && (
           <Notice tone="amber">
-            This box is copied from another company that uses the same form. Check it sits on the signature here, adjust if
-            needed, then save.
+            Copied from another company that uses the same form. Check the box sits on the signature here, then save.
           </Notice>
         )}
 
@@ -244,27 +309,27 @@ export function SignatureZoneModal({ companyId, fileHash, onClose }: Props) {
         {pdf && (
           <div
             data-testid="zone-verdict"
-            data-signed={!box ? 'none' : verdict ? String(verdict.signed) : 'pending'}
+            data-signed={verdict}
             className={`flex items-center gap-3 rounded-lg px-4 py-3 text-sm border min-h-[4.25rem] ${
-              !box || !verdict
-                ? 'bg-gray-50 border-gray-200 text-gray-500'
-                : verdict.signed
+              verdict === 'true'
                 ? 'bg-green-50 border-green-200 text-green-900'
-                : 'bg-amber-50 border-amber-200 text-amber-900'
+                : verdict === 'false'
+                ? 'bg-amber-50 border-amber-200 text-amber-900'
+                : 'bg-gray-50 border-gray-200 text-gray-500'
             }`}
           >
-            {!box ? (
-              'Drag a box on the page below, around where the approver signs.'
-            ) : !verdict ? (
-              'Reading the box…'
+            {verdict === 'none' ? (
+              'No box yet. Drag one on the page below, around where the approver signs.'
+            ) : verdict === 'pending' || !shown ? (
+              'Reading…'
             ) : (
               <>
-                {verdict.signed ? <CheckCircle size={18} /> : <XCircle size={18} />}
+                {shown.signed ? <CheckCircle size={18} /> : <XCircle size={18} />}
                 <span>
-                  This sample reads as <strong>{verdict.signed ? 'SIGNED' : 'NOT SIGNED'}</strong>
+                  This sample reads as <strong>{shown.signed ? 'SIGNED' : 'NOT SIGNED'}</strong>
                   <span className="text-xs opacity-80">
                     {' '}
-                    — mark found: {verdict.widthMm} × {verdict.heightMm} mm, {verdict.inkMm2} mm² of ink (a signature needs at least{' '}
+                    — mark found: {shown.widthMm} × {shown.heightMm} mm, {shown.inkMm2} mm² of ink (a signature needs at least{' '}
                     {SIGNATURE_MINIMUM.widthMm} × {SIGNATURE_MINIMUM.heightMm} mm and {SIGNATURE_MINIMUM.inkMm2} mm²)
                   </span>
                 </span>
@@ -273,31 +338,85 @@ export function SignatureZoneModal({ companyId, fileHash, onClose }: Props) {
           </div>
         )}
 
-        {image ? (
-          <div className="border border-gray-300 rounded-lg overflow-auto bg-gray-100 max-h-[55vh]">
-            <div
-              ref={pageRef}
-              className="relative select-none cursor-crosshair mx-auto"
-              style={{ width: 'min(100%, 820px)' }}
-              onMouseDown={onMouseDown}
-              onMouseMove={onMouseMove}
-              onMouseUp={onMouseUp}
-              onMouseLeave={onMouseUp}
-              data-testid="zone-page"
-            >
-              <img src={image} alt="Requisition page" className="block w-full" draggable={false} />
-              {box && (
+        {pdf ? (
+          <div className="relative border border-gray-300 rounded-lg overflow-auto bg-gray-200 max-h-[52vh] p-3 space-y-3" data-testid="zone-scroller">
+            {pages.map((image, index) => {
+              const page = index + 1;
+              return (
                 <div
-                  className="absolute border-2 border-ncba-teal bg-ncba-teal/15 pointer-events-none"
-                  style={{ left: `${box.x * 100}%`, top: `${box.y * 100}%`, width: `${box.w * 100}%`, height: `${box.h * 100}%` }}
-                />
-              )}
-            </div>
+                  key={page}
+                  className="relative select-none cursor-crosshair mx-auto shadow"
+                  style={{ width: 'min(100%, 820px)' }}
+                  onMouseDown={(e) => onMouseDown(e, page)}
+                  onMouseMove={(e) => onMouseMove(e, page)}
+                  onMouseUp={onMouseUp}
+                  onMouseLeave={onMouseUp}
+                  data-testid="zone-page"
+                  data-page={page}
+                >
+                  <img src={image} alt={`Page ${page}`} className="block w-full" draggable={false} />
+                  <span className="absolute top-1 left-1 text-[10px] bg-gray-800/70 text-white rounded px-1.5 py-0.5 pointer-events-none">
+                    Page {page} of {pdf.numPages}
+                  </span>
+                  {readings.map(
+                    (r, i) =>
+                      r?.at.page === page && (
+                        <div
+                          key={i}
+                          className="absolute border-2 border-gray-700 bg-gray-700/10 pointer-events-none"
+                          style={{ left: `${r.at.x * 100}%`, top: `${r.at.y * 100}%`, width: `${r.at.w * 100}%`, height: `${r.at.h * 100}%` }}
+                        >
+                          <span className="absolute -top-4 left-0 text-[10px] font-bold text-gray-700">{i + 1}</span>
+                        </div>
+                      )
+                  )}
+                  {draft?.page === page && (
+                    <div
+                      className="absolute border-2 border-ncba-teal bg-ncba-teal/15 pointer-events-none"
+                      style={{ left: `${draft.x * 100}%`, top: `${draft.y * 100}%`, width: `${draft.w * 100}%`, height: `${draft.h * 100}%` }}
+                    />
+                  )}
+                </div>
+              );
+            })}
+            {pages.length === 0 && <p className="py-16 text-center text-sm text-gray-500">Drawing the pages…</p>}
+            {pdf.numPages > MAX_PAGES && <p className="text-center text-xs text-gray-500">Only the first {MAX_PAGES} pages are shown.</p>}
           </div>
         ) : (
           <div className="border border-dashed border-gray-300 rounded-lg py-16 text-center text-sm text-gray-400">
-            Open a sample requisition to begin. Each kind of form this company uses gets its own box.
+            Open a sample requisition to begin. Each kind of form this company uses gets its own boxes.
           </div>
+        )}
+
+        {/* Below the pages on purpose: nothing above them may change size while a box is being dragged. */}
+        {(zones.length > 0 || draft) && (
+          <ul className="text-xs text-gray-700 space-y-1" data-testid="zone-boxes">
+            {zones.map((zone, i) => (
+              <li key={i} className="flex items-center gap-2" data-box="saved">
+                <span className="w-5 h-5 rounded bg-gray-700 text-white flex items-center justify-center font-bold shrink-0">{i + 1}</span>
+                <span>
+                  Box {i + 1}: {followsText(zone)}
+                  {readings[i] && ` — here on page ${readings[i]!.at.page}: ${readings[i]!.result.signed ? 'signed' : 'not signed'}`}
+                </span>
+                <button className="text-red-600 hover:underline inline-flex items-center gap-1" onClick={() => removeZone(i)} data-testid="zone-remove">
+                  <Trash2 size={12} /> Remove
+                </button>
+              </li>
+            ))}
+            {draft && (
+              <li className="flex items-center gap-2" data-box="new">
+                <span className="w-5 h-5 rounded bg-ncba-teal text-white flex items-center justify-center font-bold shrink-0">+</span>
+                <span>
+                  New box on page {draft.page}
+                  {draftZone && `: ${followsText(draftZone)}`}
+                  {draftResult && ` — ${draftResult.signed ? 'signed' : 'not signed'}`}
+                </span>
+                <button className="text-gray-600 hover:underline" onClick={clearDraft}>
+                  Discard
+                </button>
+              </li>
+            )}
+          </ul>
         )}
       </div>
     </Modal>

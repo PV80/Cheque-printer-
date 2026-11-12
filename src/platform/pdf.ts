@@ -131,7 +131,83 @@ function textMasks(t: PositionedText, pad: number): Rect[] {
 }
 
 /** Looks inside the signature box of a requisition for a signature-sized mark. */
-export async function checkSignature(pdf: PdfDocument, zone: SignatureZone): Promise<InkAnalysis> {
+export interface LocatedZone {
+  page: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+// The printed words a signature box is tied to. Only wording that labels a
+// signature is used, never names, dates or amounts, which change every time.
+const ANCHOR_PHRASE = /\b(?:approved by|authori[sz]ed by|signed by|checked by|approved|authori[sz]ed|signature|signatory|sign)\b/;
+const labelText = (s: string) => s.replace(/[_.\-–—=:]+/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+
+interface PageLabel {
+  text: string; // the labelling phrase, e.g. "approved by"
+  x: number; // where its line of text starts, as fractions of the page
+  y: number;
+}
+
+async function pageLabels(pdf: PdfDocument, pageNumber: number): Promise<PageLabel[]> {
+  const page = await pdf.getPage(pageNumber);
+  const viewport = page.getViewport({ scale: 1 });
+  const labels: PageLabel[] = [];
+  for (const t of await pageText(page, 1)) {
+    const phrase = labelText(t.str).match(ANCHOR_PHRASE);
+    if (phrase) labels.push({ text: phrase[0], x: t.x / viewport.width, y: t.y / viewport.height });
+  }
+  return labels;
+}
+
+/**
+ * Finds the signature label nearest a box that has just been drawn, so the
+ * box can follow that label on other copies of the form.
+ */
+export async function chooseAnchor(pdf: PdfDocument, at: LocatedZone): Promise<SignatureZone['anchor']> {
+  const NEAR = 0.25; // of the page width
+  // "Approved by" names the approver's place for certain; "Authorized" nearly so; a bare
+  // "Sign" nearby may be someone else's line. Lower rank wins, then the nearer label.
+  const rank = (label: PageLabel) => (label.text.endsWith(' by') ? 0 : /^(?:approved|authori[sz]ed)$/.test(label.text) ? 1 : 2);
+  let best: { label: PageLabel; distance: number } | null = null;
+  for (const label of await pageLabels(pdf, at.page)) {
+    const dx = Math.max(at.x - label.x, 0, label.x - (at.x + at.w));
+    const dy = Math.max(at.y - label.y, 0, label.y - (at.y + at.h));
+    const distance = Math.hypot(dx, dy);
+    if (distance > NEAR) continue;
+    const better = !best || (rank(label) !== rank(best.label) ? rank(label) < rank(best.label) : distance < best.distance);
+    if (better) best = { label, distance };
+  }
+  return best ? { text: best.label.text, dx: at.x - best.label.x, dy: at.y - best.label.y } : undefined;
+}
+
+/**
+ * Where a saved box sits on this particular document. A box tied to a label
+ * is placed beside that label wherever it is — lower down, or on another
+ * page. Otherwise it stays where it was drawn.
+ */
+export async function locateZone(pdf: PdfDocument, zone: SignatureZone): Promise<LocatedZone> {
+  const fixed: LocatedZone = { page: zone.page, x: zone.x, y: zone.y, w: zone.w, h: zone.h };
+  if (!zone.anchor) return fixed;
+
+  const order = [zone.page, ...Array.from({ length: pdf.numPages }, (_, i) => i + 1).filter((n) => n !== zone.page)];
+  for (const page of order) {
+    if (page < 1 || page > pdf.numPages) continue;
+    const hits = (await pageLabels(pdf, page)).filter((l) => l.text === zone.anchor!.text);
+    if (hits.length === 0) continue;
+    // If the wording appears twice on the page, take the one that puts the box closest to where it was drawn.
+    const place = (l: PageLabel) => ({ x: l.x + zone.anchor!.dx, y: l.y + zone.anchor!.dy });
+    const off = (l: PageLabel) => Math.abs(place(l).x - zone.x) + Math.abs(place(l).y - zone.y);
+    const hit = hits.reduce((a, b) => (off(b) < off(a) ? b : a));
+    const clamp = (v: number, size: number) => Math.min(Math.max(0, v), Math.max(0, 1 - size));
+    return { page, x: clamp(place(hit).x, zone.w), y: clamp(place(hit).y, zone.h), w: zone.w, h: zone.h };
+  }
+  return fixed;
+}
+
+/** Reads one box at a known place on a known page. */
+async function readBox(pdf: PdfDocument, zone: LocatedZone, ignoreTypedText: boolean): Promise<InkAnalysis> {
   if (zone.page < 1 || zone.page > pdf.numPages) return NOT_SIGNED;
 
   const { canvas, scale } = await renderPage(pdf, zone.page, SIGNATURE_SCALE);
@@ -144,7 +220,7 @@ export async function checkSignature(pdf: PdfDocument, zone: SignatureZone): Pro
   const pixels = canvas.getContext('2d', { willReadFrequently: true })!.getImageData(x, y, width, height);
 
   let maskRects: Rect[] = [];
-  if (zone.ignoreTypedText) {
+  if (ignoreTypedText) {
     const page = await pdf.getPage(zone.page);
     const pad = 0.6 * POINTS_PER_MM * scale;
     maskRects = (await pageText(page, scale))
@@ -163,4 +239,20 @@ export async function checkSignature(pdf: PdfDocument, zone: SignatureZone): Pro
   }
 
   return analyseSignatureZone({ data: pixels.data, width, height, pxPerMm: POINTS_PER_MM * scale, maskRects });
+}
+
+/** Looks inside one signature box of a requisition for a signature-sized mark. */
+export async function checkSignature(pdf: PdfDocument, zone: SignatureZone): Promise<InkAnalysis> {
+  return readBox(pdf, await locateZone(pdf, zone), zone.ignoreTypedText);
+}
+
+/** A form may be signed in more than one place: a signature in any of its boxes counts. */
+export async function checkSignatureBoxes(pdf: PdfDocument, zones: SignatureZone[]): Promise<InkAnalysis> {
+  let best = NOT_SIGNED;
+  for (const zone of zones) {
+    const result = await checkSignature(pdf, zone);
+    if (result.signed) return result;
+    if (result.inkMm2 > best.inkMm2) best = result;
+  }
+  return best;
 }

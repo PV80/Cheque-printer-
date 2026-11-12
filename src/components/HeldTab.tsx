@@ -64,12 +64,22 @@ export function HeldTab() {
         );
       }
       case 'unsigned':
-      case 'duplicate_payment':
+      case 'duplicate_payment': {
+        const unsigned = cheque.requisitions.find((r) => r.signature.status === 'not_signed');
         return (
-          <Button small onClick={() => setDialog({ type: 'override', cheque, kind: issue.kind as OverrideKind, message: issue.message })} data-testid="override-open">
-            {can(user, 'override') ? 'Override…' : 'Supervisor override…'}
-          </Button>
+          <span className="inline-flex items-center gap-2">
+            {/* If it is signed but was not seen, the box is in the wrong place: fix that first. */}
+            {issue.kind === 'unsigned' && company && unsigned && can(user, 'manage_companies') && (
+              <Button small onClick={() => setDialog({ type: 'zone', company, fileHash: unsigned.fileHash })} data-testid="zone-fix">
+                Signature box…
+              </Button>
+            )}
+            <Button small onClick={() => setDialog({ type: 'override', cheque, kind: issue.kind as OverrideKind, message: issue.message })} data-testid="override-open">
+              {can(user, 'override') ? 'Override…' : 'Supervisor override…'}
+            </Button>
+          </span>
         );
+      }
       case 'no_company':
         return can(user, 'assign_company') ? (
           <Button small onClick={() => setDialog({ type: 'assign', cheque })}>Choose company…</Button>

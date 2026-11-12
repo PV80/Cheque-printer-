@@ -193,6 +193,9 @@ describe('parseRequisition — the typed voucher as really used', () => {
   it('reports a second requisition hiding in the same PDF', () => {
     expect(parseRequisition([REAL_VOUCHER, REAL_VOUCHER, ['Invoice']]).otherRequisitionPages).toEqual([2]);
     expect(parseRequisition([REAL_VOUCHER, ['REQUISITION NOTE', 'PAYEE: X']]).otherRequisitionPages).toEqual([]);
+    // A long receipt that runs on to a second page is still one requisition.
+    const runOn = ['Payment Receipt: PBNK9/2026/00001', 'INVOICE NUMBER   REFERENCE   AMOUNT', 'APPROVED BY: ________'];
+    expect(parseRequisition([REAL_VOUCHER, runOn]).otherRequisitionPages).toEqual([]);
   });
 });
 

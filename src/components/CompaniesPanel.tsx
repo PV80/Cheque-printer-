@@ -190,12 +190,12 @@ function CompanyEditor({ company, onBack }: { company: CompanyProfile; onBack: (
             on each. A requisition only reaches the print queue when something signature-sized is in its box.
           </p>
           <ul className="space-y-1.5" data-testid="zone-list">
-            {FORM_TYPES.filter((t) => t !== 'unknown' || company.signatureZones.unknown).map((type) => {
-              const zone = company.signatureZones[type];
+            {FORM_TYPES.filter((t) => t !== 'unknown' || company.signatureZones.unknown?.length).map((type) => {
+              const zone = company.signatureZones[type]?.length ? company.signatureZones[type] : undefined;
               return (
                 <li key={type} data-form={type} data-set={zone ? 'yes' : 'no'} className={`flex items-center gap-2 text-sm ${zone ? 'text-green-700' : 'text-amber-700'}`}>
                   {zone ? <CheckCircle size={15} /> : <span className="w-[15px] text-center">–</span>}
-                  {FORM_LABELS[type]}: {zone ? `set (page ${zone.page})` : 'not set — these will be held'}
+                  {FORM_LABELS[type]}: {zone ? (zone.length === 1 ? 'set' : `${zone.length} boxes set`) : 'not set — these will be held'}
                 </li>
               );
             })}

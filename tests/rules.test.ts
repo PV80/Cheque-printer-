@@ -11,6 +11,7 @@ import {
   assertPrintable,
   assignCompany,
   cancelCheque,
+  cancelCheques,
   checkFileHash,
   clearSentToPrinter,
   combineCheques,
@@ -21,12 +22,14 @@ import {
   importCompanyLayouts,
   markSentToPrinter,
   markSpoiled,
+  mergeRegister,
   parseStore,
   reconcileRestore,
   recordPrintResults,
   revertPrinted,
   saveCompany,
   serializeStore,
+  shareRegister,
   StoreError,
   updateUser,
 } from '../src/core/store';
@@ -548,7 +551,7 @@ describe('companies', () => {
     const co = makeCompany('Alpha Ltd');
     const waiting = makeCheque(co);
     const printed = makeCheque(co, { status: 'printed', chequeNumber: '000200', payee: 'B' });
-    const moved = { ...co, signatureZones: { requisition_voucher: { ...co.signatureZones.requisition_voucher!, x: 0.1 } } };
+    const moved = { ...co, signatureZones: { requisition_voucher: [{ ...co.signatureZones.requisition_voucher![0], x: 0.1 }] } };
     const store = saveCompany(makeStore([co], [waiting, printed]), ctxFor(admin), moved);
     expect(store.cheques[0].requisitions[0].signature.status).toBe('unchecked');
     expect(store.cheques[1].requisitions[0].signature.status).toBe('signed');
@@ -596,6 +599,89 @@ describe('companies', () => {
     expect(alpha.template.fields.payee).toMatchObject({ x: 25, y: 30, fontFamily: 'Courier New' });
     expect(alpha.template.fields.date.x).toBe(148);
     expect(result.store.companies.map((c) => c.name)).toContain('Gamma Ltd');
+  });
+});
+
+describe('sharing the register between computers', () => {
+  const co = makeCompany('Alpha Ltd');
+  const printedThere = (overrides = {}) => makeCheque(co, { status: 'printed', printedAt: '2026-06-05T09:00:00.000Z', printedByName: 'Mary', ...overrides });
+
+  it('only sends cheques that were printed or spoiled', () => {
+    const store = makeStore([co], [printedThere({ chequeNumber: '000001' }), makeCheque(co, { chequeNumber: '000002', payee: 'B' }), makeCheque(co, { chequeNumber: '000003', payee: 'C', status: 'spoiled' })]);
+    const share = shareRegister(store, 'Mary', '2026-06-05T17:00:00.000Z');
+    expect(share.cheques.map((c) => c.chequeNumber)).toEqual(['000001', '000003']);
+    expect(share.companies.map((c) => c.name)).toEqual(['Alpha Ltd']);
+  });
+
+  it('a number used on the other computer is blocked here', () => {
+    const there = makeStore([co], [printedThere({ chequeNumber: '000050' })]);
+    const share = JSON.parse(JSON.stringify(shareRegister(there, 'Mary', '2026-06-05T17:00:00.000Z')));
+
+    // This computer set the company up separately, so its id differs; the name matches.
+    const sameCompanyHere = makeCompany('ALPHA LIMITED');
+    const waiting = makeCheque(sameCompanyHere, { chequeNumber: '50', payee: 'Someone Else', amountCents: 100_000 });
+    const result = mergeRegister(makeStore([sameCompanyHere], [waiting]), ctxFor(supervisor), share);
+
+    expect(result).toMatchObject({ added: 1, known: 0, companiesAdded: [], clashes: [] });
+    const received = result.store.cheques.find((c) => c.chequeNumber === '000050')!;
+    expect(received).toMatchObject({ status: 'printed', companyId: sameCompanyHere.id, receivedFrom: 'Mary, 05/06/2026' });
+    const issues = createIssueChecker(result.store)(result.store.cheques[0]);
+    expect(kinds(issues)).toEqual(['duplicate_number']);
+    expect(issues[0].hard).toBe(true);
+    expect(buildQueue(result.store, (c) => createIssueChecker(result.store)(c).length === 0)).toEqual([]);
+    expect(result.store.audit[result.store.audit.length - 1].action).toBe('Received register');
+  });
+
+  it('taking the same file in twice changes nothing', () => {
+    const share = JSON.parse(JSON.stringify(shareRegister(makeStore([co], [printedThere()]), 'Mary', '2026-06-05T17:00:00.000Z')));
+    const once = mergeRegister(makeStore([co]), ctxFor(admin), share);
+    const twice = mergeRegister(once.store, ctxFor(admin), share);
+    expect(twice).toMatchObject({ added: 0, known: 1 });
+    expect(twice.store.cheques).toHaveLength(1);
+  });
+
+  it('brings over a company this computer does not have, and reports a number used on both', () => {
+    const other = makeCompany('Beta Ltd');
+    const there = makeStore([co, other], [printedThere({ chequeNumber: '000007' }), makeCheque(other, { status: 'printed', chequeNumber: '000900', payee: 'Z' })]);
+    const share = JSON.parse(JSON.stringify(shareRegister(there, 'Mary', '2026-06-05T17:00:00.000Z')));
+    const usedHereToo = makeCheque(co, { status: 'printed', chequeNumber: '7', payee: 'A Different Payee', amountCents: 500 });
+    const result = mergeRegister(makeStore([co], [usedHereToo]), ctxFor(supervisor), share);
+    expect(result.companiesAdded).toEqual(['Beta Ltd']);
+    expect(result.clashes).toEqual(['000007']);
+    expect(result).toMatchObject({ added: 1, known: 1 });
+    expect(result.store.cheques).toHaveLength(2);
+  });
+
+  it('operators cannot take a register in, and other files are refused', () => {
+    const share = shareRegister(makeStore([co], [printedThere()]), 'Mary', '2026-06-05T17:00:00.000Z');
+    expect(() => mergeRegister(makeStore([co]), ctxFor(operator), share)).toThrow(StoreError);
+    expect(() => mergeRegister(makeStore([co]), ctxFor(admin), { version: 1, cheques: [] })).toThrow('not a register');
+  });
+});
+
+describe('clearing the queue', () => {
+  it('discards every cheque given and logs each one', () => {
+    const co = makeCompany('Alpha Ltd');
+    const a = makeCheque(co, { chequeNumber: '000001', payee: 'A' });
+    const b = makeCheque(co, { chequeNumber: '000002', payee: 'B' });
+    const store = cancelCheques(makeStore([co], [a, b]), ctxFor(operator), [a.id, b.id], 'Cleared from the print queue');
+    expect(store.cheques.map((c) => c.status)).toEqual(['cancelled', 'cancelled']);
+    expect(store.audit).toHaveLength(2);
+    expect(checkFileHash(store, a.requisitions[0].fileHash)).toEqual({ known: false }); // can be dropped in again
+  });
+});
+
+describe('signature boxes saved by an earlier version', () => {
+  it('a single box per form becomes a list of one', () => {
+    const old = { id: 'c1', name: 'Alpha Ltd', signatureZones: { payment_receipt: { page: 1, x: 0.1, y: 0.6, w: 0.3, h: 0.05, ignoreTypedText: true } } };
+    const store = parseStore(JSON.stringify({ version: 1, companies: [old] }));
+    expect(store.companies[0].signatureZones).toEqual({ payment_receipt: [{ page: 1, x: 0.1, y: 0.6, w: 0.3, h: 0.05, ignoreTypedText: true }] });
+  });
+
+  it('keeps the label a box is tied to', () => {
+    const zone = { page: 1, x: 0.1, y: 0.6, w: 0.3, h: 0.05, ignoreTypedText: true, anchor: { text: 'Approved By', dx: 0.05, dy: -0.02 } };
+    const store = parseStore(JSON.stringify({ version: 1, companies: [{ id: 'c1', name: 'Alpha Ltd', signatureZones: { payment_receipt: [zone] } }] }));
+    expect(store.companies[0].signatureZones.payment_receipt![0].anchor).toEqual({ text: 'approved by', dx: 0.05, dy: -0.02 });
   });
 });
 

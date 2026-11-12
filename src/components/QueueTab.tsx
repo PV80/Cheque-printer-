@@ -6,7 +6,7 @@ import { formatDate, todayIso } from '../core/dates';
 import { getWarnings } from '../core/issues';
 import { chequeValues, layoutCheque } from '../core/layout';
 import { findMissingNumbers, usedChequeNumbers, type NumberRange, type QueueGroup } from '../core/queue';
-import { cancelCheque } from '../core/store';
+import { cancelCheque, cancelCheques } from '../core/store';
 import type { Cheque } from '../core/types';
 import { measureText } from '../platform/measure';
 import { useApp } from '../state/AppContext';
@@ -57,6 +57,18 @@ export function QueueTab() {
     if (run((s, ctx) => cancelCheque(s, ctx, cheque.id, 'Discarded from the print queue'))) notify('info', 'Requisition discarded.');
   }
 
+  /** Takes requisitions out of the queue. They stay in the register as discarded and can be dropped in again. */
+  function clear(cheques: Cheque[], what: string) {
+    const question =
+      `Clear ${cheques.length} cheque${cheques.length === 1 ? '' : 's'} from ${what}?\n\n` +
+      'They will not be printed. To print one later, drop its requisition PDF in again.';
+    if (!window.confirm(question)) return;
+    const ids = cheques.map((c) => c.id);
+    if (run((s, ctx) => cancelCheques(s, ctx, ids, 'Cleared from the print queue'))) {
+      notify('info', `${ids.length} cheque${ids.length === 1 ? '' : 's'} cleared from ${what}.`);
+    }
+  }
+
   /** The leaves actually going into this run, and the ones to pull from the stack. */
   function runFor(group: QueueGroup) {
     const cheques = group.cheques.filter((c) => !skipped.has(c.id));
@@ -71,7 +83,12 @@ export function QueueTab() {
 
   return (
     <div className="max-w-5xl mx-auto py-6 px-4">
-      <h1 className="text-xl font-bold text-gray-800 mb-1">Print queue</h1>
+      <div className="flex items-center justify-between gap-4 mb-1">
+        <h1 className="text-xl font-bold text-gray-800">Print queue</h1>
+        <Button small variant="danger" onClick={() => clear(queue.flatMap((g) => g.cheques), 'the whole print queue')} data-testid="clear-all">
+          <Trash2 size={13} /> Clear whole queue
+        </Button>
+      </div>
       <p className="text-sm text-gray-500 mb-5">
         One company at a time. Each list is in the order the cheque leaves must be loaded: lowest number first.
       </p>
@@ -104,6 +121,10 @@ export function QueueTab() {
                     {group.lastPrinted && ` · last used ${group.lastPrinted}`}
                   </p>
                 </div>
+                <div className="flex items-center gap-2 shrink-0">
+                <Button small variant="ghost" onClick={() => clear(group.cheques, `the ${group.company.name} queue`)} data-testid="clear-company">
+                  <Trash2 size={13} /> Clear
+                </Button>
                 <Button
                   variant="primary"
                   disabled={cheques.length === 0 || !can(user, 'print')}
@@ -112,6 +133,7 @@ export function QueueTab() {
                 >
                   <Printer size={15} /> Print {cheques.length}
                 </Button>
+                </div>
               </div>
 
               {missing.length > 0 && (

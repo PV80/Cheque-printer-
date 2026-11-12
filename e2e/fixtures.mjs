@@ -169,9 +169,38 @@ export async function makeRequisitionPdf(o) {
     page.node.set(PDFName.of('Annots'), doc.context.obj([annotation]));
   }
 
+  if (o.note) {
+    // Page two: the requisition note. Some vouchers are signed here instead of on page one.
+    const second = doc.addPage([PAGE.w, PAGE.h]);
+    const line = (str, x, y, size = 10, f = font) => second.drawText(str, { x, y, size, font: f, color: rgb(0, 0, 0) });
+    line(o.company, 50, 785, 15, bold);
+    line('REQUISITION NOTE', 50, 760, 12, bold);
+    line(`DETAIL: ${o.details ?? 'Payment as per attached invoice'}`, 50, 700);
+    line('REQUESTED BY:', 50, 600);
+    line('APPROVED BY:', 320, 600);
+    line('Jane W.', 50, 560);
+    line('John Approver', 320, 560);
+    if (o.note === 'signed') {
+      second.drawSvgPath('M 0 22 C 12 -12, 22 44, 38 16 S 62 -6, 78 22 S 104 38, 124 6 C 110 30, 90 34, 70 30', {
+        x: 410,
+        y: 612,
+        borderColor: blue,
+        borderWidth: 1.3,
+      });
+    }
+  }
+
   stamp(doc);
   return doc.save();
 }
+
+/** Where the approver signs on page two of the voucher (the requisition note). */
+export const NOTE_SIGNATURE_BOX = {
+  x: 400 / PAGE.w,
+  y: (PAGE.h - 562 - 64) / PAGE.h,
+  w: 160 / PAGE.w,
+  h: 64 / PAGE.h,
+};
 
 // ---- The accounts-system payment receipt (US letter) -------------------------------
 
@@ -194,6 +223,7 @@ export const RECEIPT_SIGNATURE_BOX = {
  * @param {string} o.amount    e.g. "59,000.00"
  * @param {string} o.chq       cheque number; printed on its own line, as when the reference wraps
  * @param {boolean} [o.signed]
+ * @param {boolean} [o.approvalOnPage2]  a long receipt: the approval lines fall on a second page
  */
 export async function makeReceiptPdf(o) {
   const doc = await PDFDocument.create();
@@ -225,12 +255,16 @@ export async function makeReceiptPdf(o) {
   text('Due Amount for', 115, 425, 9, bold);
   text('KSh 0.00', 540, 425, 9, bold);
 
-  text('PREPARED BY: ________________________________________', 40, 300, 9, bold);
-  text('APPROVED BY: ________________________________________', 40, 268, 9, bold);
-  text('John Approver', 112, 271, 9, font, rgb(0.1, 0.3, 0.8)); // typed beside the signature
+  // The approval lines: normally low on page one; on a long receipt they fall on page two, higher up.
+  const sheet = o.approvalOnPage2 ? doc.addPage([LETTER.w, LETTER.h]) : page;
+  const top = o.approvalOnPage2 ? 650 : 300;
+  const put = (str, x, y, f = bold, color = rgb(0, 0, 0)) => sheet.drawText(str, { x, y, size: 9, font: f, color });
+  put('PREPARED BY: ________________________________________', 40, top);
+  put('APPROVED BY: ________________________________________', 40, top - 32);
+  put('John Approver', 112, top - 29, font, rgb(0.1, 0.3, 0.8)); // typed beside the signature
   if (o.signed) {
     const png = await doc.embedPng(signaturePng());
-    page.drawImage(png, { x: 205, y: 257, width: 105, height: 31 });
+    sheet.drawImage(png, { x: 205, y: top - 43, width: 105, height: 31 });
   }
   text('+254 700 000000 info@example.com', 40, 60, 8);
 

@@ -25,11 +25,19 @@ print one company at a time with a prompt that says exactly which leaves to load
    by its "Bank:" line, because that names the account the cheque is drawn on. The first time
    a new name or bank account appears the requisition is held; choose its company once and
    the app remembers.
-3. **Set the signature box** for each company and each kind of form it uses (the voucher and
-   the receipt are signed in different places). Open a sample, drag a box around where the
-   approver signs — the typed name and the underline may be inside it, they are ignored. Then
-   try an unsigned copy: it must read *Not signed*. A box already set for the same form at
-   another company is offered as a starting point.
+3. **Set the signature boxes** for each company and each kind of form it uses (the voucher and
+   the receipt are signed in different places). Open a sample — every page is shown, scroll to
+   the one that is signed — and drag a box around where the approver signs. The typed name and
+   the underline may be inside it; they are ignored. Then try an unsigned copy: it must read
+   *Not signed*.
+   - A box ties itself to the nearest signature label ("APPROVED BY", "Authorized By") and
+     follows those words if they move down the page or on to another page.
+   - A form can have more than one box (page one, and the note on page two). A signature in
+     any of them counts.
+   - A box already set for the same form at another company is offered as a starting point.
+   - If a signed requisition is ever held as unsigned, an administrator can open **Signature
+     box…** on it in Held, see where the app looked, and add or move a box. Override is for
+     when it genuinely is not signed.
 4. **Check the cheque layout** for each company. Positions start from an estimate, so:
    print a test on plain paper → hold it against a real cheque up to the light → nudge the
    fields → repeat until it lines up → Save. For a second company whose cheque is nearly the
@@ -61,6 +69,28 @@ types their own username, password and a reason in the override window. Both nam
    load the leaves in the order shown, tick that the first leaf matches, print.
 4. Afterwards say what happened to each leaf: printed correctly, spoiled, or did not print.
 5. **Register** — everything loaded and what became of it; export to a spreadsheet (CSV).
+
+The print queue has **Clear** on each company and **Clear whole queue**. Cleared requisitions
+are kept in the register as discarded; drop the PDF in again to print one after all.
+
+## More than one computer
+
+Each computer keeps its own register. To stop two computers using the same cheque number:
+
+1. On the computer that has been printing: Register → **Send to another computer**. This saves
+   a file listing every cheque printed or spoiled there (no passwords, no PDFs).
+2. Move the file across (USB stick, shared folder, email).
+3. On the other computer: Register → **Receive from another computer** (supervisor or
+   administrator).
+
+Those cheque numbers now count as used there too: a requisition for one is held, the same PDF
+is refused as already printed, and the queue shows where each cheque book has got to. A
+company the receiving computer does not have comes across with its layout. Receiving the same
+file twice does no harm. If both computers have already used one number for different
+payments, it says so. Do this at the end of each day, or before the other computer prints.
+
+It is a hand-over, not a live link: between hand-overs the computers do not know about each
+other.
 
 ## Rules the app enforces
 
@@ -96,8 +126,8 @@ types their own username, password and a reason in the override window. Both nam
   It guards against a forgotten approval, not against forgery.
 - **It needs PDFs signed on screen.** A printed, pen-signed and scanned page has no readable
   text and is rejected.
-- **It is for one computer.** The register is not shared; two PCs would not know about each
-  other's printed cheques.
+- **It is not networked.** Two computers only learn about each other's printed cheques when
+  the register file is passed between them (see above).
 - **Sign-in is not a vault.** It records who did what and stops casual misuse. Someone with
   full access to the computer's files could still alter the data file.
 

@@ -15,13 +15,14 @@ export type Permission =
   | 'assign_company'
   | 'override' // release an unsigned requisition or a possible double payment
   | 'mark_spoiled' // mark an already-printed cheque as spoiled later
+  | 'sync_register' // take in the register shared from another computer
   | 'revert_printed' // undo "printed" when the leaf was never actually used
   | 'manage_companies' // layouts, signature boxes, printers
   | 'manage_users'
   | 'manage_data'; // backup, restore, settings
 
 const OPERATOR: Permission[] = ['import', 'print', 'discard', 'resolve_duplicate'];
-const SUPERVISOR: Permission[] = [...OPERATOR, 'edit_cheque', 'assign_company', 'override', 'mark_spoiled'];
+const SUPERVISOR: Permission[] = [...OPERATOR, 'edit_cheque', 'assign_company', 'override', 'mark_spoiled', 'sync_register'];
 const ADMIN: Permission[] = [...SUPERVISOR, 'revert_printed', 'manage_companies', 'manage_users', 'manage_data'];
 
 export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
