@@ -204,7 +204,7 @@ const CHQ_INLINE = new RegExp(
 const CHQ_OPEN = new RegExp(String.raw`${CHQ_WORD}\s*(${CHQ_MARK})?\s*[:\-–#]?\s*(?=$|\s{3,}|(?:kshs?|kes)\b)`, 'i');
 const CHQ_REST = new RegExp(String.raw`^(${CHQ_MARK})?\s*[:\-–#]?\s*(\d{1,12})(?!\d)`, 'i');
 
-function chequeNumbers(lines: string[]): string[] {
+export function chequeNumbers(lines: string[]): string[] {
   const found: string[] = [];
   lines.forEach((line, i) => {
     CHQ_INLINE.lastIndex = 0;

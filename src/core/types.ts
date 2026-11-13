@@ -92,7 +92,13 @@ export interface CompanyProfile {
 
 // ---- Requisitions and cheques -------------------------------------------------
 
-export type DocumentType = 'requisition_voucher' | 'payment_receipt' | 'unknown';
+export type DocumentType = 'requisition_voucher' | 'payment_receipt' | 'salary_slip' | 'unknown';
+
+/** Pages of a PDF, 1-based and inclusive. */
+export interface PageRange {
+  from: number;
+  to: number;
+}
 
 export interface SignatureResult {
   status: 'signed' | 'not_signed' | 'unchecked';
@@ -122,6 +128,11 @@ export interface Requisition {
   /** Doubts raised while reading the PDF that a person must clear. */
   reviewNotes: string[];
   signature: SignatureResult;
+  /**
+   * The part of the PDF this is, when one PDF holds several: each salary slip
+   * of a payroll. Unset = the whole file is this one requisition.
+   */
+  pages?: PageRange;
 }
 
 export type OverrideKind = 'unsigned' | 'duplicate_payment';

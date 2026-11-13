@@ -1,11 +1,13 @@
 // What happens when a PDF is dropped on the app.
 
+import { can } from '../core/auth';
 import { matchCompany } from '../core/company';
 import { formatTimestampDate } from '../core/dates';
 import { createIssueChecker } from '../core/issues';
 import { parseRequisition } from '../core/parser';
-import { addCheque, chequeFromRequisition, checkFileHash, type Ctx } from '../core/store';
-import type { Requisition, SignatureResult, SignatureZone, Store, User } from '../core/types';
+import { parsePayroll, type PayrollSlip } from '../core/payroll';
+import { addCheque, addPayroll, chequeFromRequisition, checkFileHash, describeCheque, loadedSlips, type Ctx } from '../core/store';
+import type { Cheque, PageRange, Requisition, SignatureResult, SignatureZone, Store, User } from '../core/types';
 
 import { api } from '../platform/api';
 import { measureText } from '../platform/measure';
@@ -18,16 +20,35 @@ export interface ImportOutcome {
   message: string;
 }
 
+/** A payroll PDF waiting for someone to say which cheques to make from it. */
+export interface PayrollRequest {
+  filename: string;
+  period: string;
+  companyRaw: string;
+  /** The company the slips name, if it is known; otherwise the only company there is. */
+  suggestedCompanyId: string | null;
+  slips: (PayrollSlip & { /** Set when a cheque was already made from this slip. */ loadedAs?: string })[];
+}
+
+export interface PayrollAnswer {
+  companyId: string;
+  date: string; // ISO
+  /** The cheque number for each slip to load, by the page the slip starts on. */
+  numbers: Record<number, string>;
+}
+
 export interface ImportDeps {
   user: User;
   getStore: () => Store;
   run: (action: (store: Store, ctx: Ctx) => Store) => boolean;
+  /** Shows the payroll window; resolves with null if it is cancelled. */
+  askPayroll: (request: PayrollRequest) => Promise<PayrollAnswer | null>;
 }
 
 const MAX_PDF_BYTES = 50 * 1024 * 1024;
 
-export async function signatureResult(pdf: PdfDocument, zones: SignatureZone[]): Promise<SignatureResult> {
-  const ink = await checkSignatureBoxes(pdf, zones);
+export async function signatureResult(pdf: PdfDocument, zones: SignatureZone[], within?: PageRange): Promise<SignatureResult> {
+  const ink = await checkSignatureBoxes(pdf, zones, within);
   return {
     status: ink.signed ? 'signed' : 'not_signed',
     inkMm2: ink.inkMm2,
@@ -46,7 +67,8 @@ export async function importPdfFile(file: File, deps: ImportDeps): Promise<Impor
 
   const fileHash = await sha256Hex(bytes);
   const seen = checkFileHash(deps.getStore(), fileHash);
-  if (seen.known) {
+  // A payroll is looked at again: some of its salary slips may not be loaded yet.
+  if (seen.known && loadedSlips(deps.getStore(), fileHash).size === 0) {
     const n = seen.cheque.chequeNumber || '(no number)';
     if (seen.reason === 'already_loaded') return { state: 'skipped', message: `Already loaded (cheque ${n}).` };
     if (seen.reason === 'already_printed') {
@@ -74,6 +96,9 @@ export async function importPdfFile(file: File, deps: ImportDeps): Promise<Impor
         message: 'No readable text — this looks like a scan or photo. Use the original PDF, signed on screen.',
       };
     }
+
+    const slips = parsePayroll(pages);
+    if (slips.length > 0) return await importPayroll({ file, bytes, fileHash, pdf, slips }, deps);
 
     const { otherRequisitionPages, ...parsed } = parseRequisition(pages, { producedOn: await producedOn(pdf) });
     if (otherRequisitionPages.length > 0) {
@@ -129,4 +154,103 @@ export async function importPdfFile(file: File, deps: ImportDeps): Promise<Impor
   } finally {
     void pdf.destroy();
   }
+}
+
+/** One PDF holding a salary slip for each employee: one cheque is made per slip. */
+async function importPayroll(
+  input: { file: File; bytes: Uint8Array; fileHash: string; pdf: PdfDocument; slips: PayrollSlip[] },
+  deps: ImportDeps
+): Promise<ImportOutcome> {
+  const { file, bytes, fileHash, pdf, slips } = input;
+  const count = `${slips.length} salary ${slips.length === 1 ? 'slip' : 'slips'}`;
+  if (!can(deps.user, 'edit_cheque')) {
+    return {
+      state: 'error',
+      message: `This is a payroll with ${count}. A supervisor or administrator must load it, because each cheque has to be given its number.`,
+    };
+  }
+
+  const loaded = loadedSlips(deps.getStore(), fileHash);
+  if (!slips.some((slip) => slip.amountCents > 0)) {
+    return { state: 'error', message: `This payroll has ${count}, but none shows an amount to pay.` };
+  }
+  if (slips.every((slip) => loaded.has(slip.pages.from) || slip.amountCents <= 0)) {
+    return { state: 'skipped', message: `Already loaded: this payroll (${loaded.size} ${loaded.size === 1 ? 'cheque' : 'cheques'}).` };
+  }
+
+  const companies = deps.getStore().companies;
+  const suggested = matchCompany(slips[0].companyRaw, companies) ?? (companies.length === 1 ? companies[0] : null);
+  const answer = await deps.askPayroll({
+    filename: file.name,
+    period: slips[0].period,
+    companyRaw: slips[0].companyRaw,
+    suggestedCompanyId: suggested?.id ?? null,
+    slips: slips.map((slip) => {
+      const cheque = loaded.get(slip.pages.from);
+      return cheque ? { ...slip, loadedAs: describeCheque(cheque) } : slip;
+    }),
+  });
+  if (!answer) return { state: 'skipped', message: `Payroll with ${count}: cancelled, nothing was loaded.` };
+
+  const company = deps.getStore().companies.find((c) => c.id === answer.companyId);
+  if (!company) return { state: 'error', message: 'That company no longer exists.' };
+  const zones = company.signatureZones.salary_slip;
+
+  await api.savePdf(fileHash, bytes);
+
+  const now = new Date().toISOString();
+  const cheques: Cheque[] = [];
+  for (const slip of slips) {
+    const chequeNumber = answer.numbers[slip.pages.from];
+    if (chequeNumber === undefined) continue;
+    const requisition: Requisition = {
+      id: crypto.randomUUID(),
+      filename: file.name,
+      fileHash,
+      importedAt: now,
+      importedById: deps.user.id,
+      importedByName: deps.user.displayName,
+      documentType: 'salary_slip',
+      companyRaw: slip.companyRaw,
+      payee: slip.payee,
+      dateRaw: slip.period,
+      date: '',
+      amountCents: slip.amountCents,
+      amountWordsRaw: '',
+      wordsCents: null,
+      chequeNumber: slip.chequeNumber,
+      reviewNotes: slip.reviewNotes,
+      // Each slip is signed in its own right: only its own pages are looked at.
+      signature: zones?.length ? await signatureResult(pdf, zones, slip.pages) : { status: 'unchecked' },
+      pages: slip.pages,
+    };
+    // The number and the date come from the person loading the payroll, not from the slip.
+    cheques.push({ ...chequeFromRequisition(requisition, company.id, crypto.randomUUID(), now), chequeNumber, date: answer.date });
+  }
+
+  // If the signature box changed while the slips were being read, check them again later.
+  const zonesNow = deps.getStore().companies.find((c) => c.id === company.id)?.signatureZones.salary_slip;
+  if (JSON.stringify(zonesNow) !== JSON.stringify(zones)) {
+    for (const cheque of cheques) cheque.requisitions[0].signature = { status: 'unchecked' };
+  }
+
+  if (!deps.run((store, ctx) => addPayroll(store, ctx, cheques))) {
+    return { state: 'error', message: 'The payroll was not loaded. Drop it again to correct the cheque numbers.' };
+  }
+
+  const store = deps.getStore();
+  const check = createIssueChecker(store, measureText);
+  const held = cheques.filter((cheque) => {
+    const added = store.cheques.find((c) => c.id === cheque.id);
+    return added !== undefined && check(added).length > 0;
+  });
+  const numbers = cheques.map((c) => c.chequeNumber);
+  const label = `${company.name} — payroll ${slips[0].period}: ${cheques.length} ${cheques.length === 1 ? 'cheque' : 'cheques'} (${numbers[0]}${numbers.length > 1 ? ` to ${numbers[numbers.length - 1]}` : ''})`;
+  if (held.length === 0) return { state: 'queued', message: `${label}. All signed — added to the print queue.` };
+
+  const firstHeld = store.cheques.find((c) => c.id === held[0].id)!;
+  return {
+    state: 'held',
+    message: `${label}. ${cheques.length - held.length} in the print queue, ${held.length} held: ${check(firstHeld)[0].message}`,
+  };
 }

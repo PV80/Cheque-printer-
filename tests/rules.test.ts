@@ -2,11 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { authenticate, can, hashPassword, verifyPassword } from '../src/core/auth';
 import { formatTimestamp } from '../src/core/dates';
 import { createIssueChecker, getWarnings, isSigned } from '../src/core/issues';
-import { buildQueue, compareChequeNumbers, findMissingNumbers } from '../src/core/queue';
+import { buildQueue, compareChequeNumbers, findMissingNumbers, nextChequeNumber } from '../src/core/queue';
 import { activityCsv, registerCsv } from '../src/core/register';
 import {
+  StoreError,
   addCheque,
   addOverride,
+  addPayroll,
   addUser,
   assertPrintable,
   assignCompany,
@@ -20,17 +22,18 @@ import {
   editCheque,
   emptyStore,
   importCompanyLayouts,
+  loadedSlips,
   markSentToPrinter,
   markSpoiled,
   mergeRegister,
   parseStore,
+  payrollNumberProblems,
   reconcileRestore,
   recordPrintResults,
   revertPrinted,
   saveCompany,
   serializeStore,
   shareRegister,
-  StoreError,
   updateUser,
 } from '../src/core/store';
 import { admin, ctxFor, fakeMeasure, makeCheque, makeCompany, makeStore, operator, supervisor } from './helpers';
@@ -727,6 +730,88 @@ describe('restoring a backup', () => {
       ['000003', 'printed'],
     ]);
     expect(buildQueue(restored, () => true)).toEqual([]);
+  });
+});
+
+describe('payroll: one PDF, a cheque for each employee', () => {
+  const co = makeCompany('Alpha Ltd');
+  const slipCheque = (payee: string, chequeNumber: string, from: number, overrides: Partial<Parameters<typeof makeCheque>[1]> = {}) =>
+    makeCheque(co, {
+      payee,
+      chequeNumber,
+      amountCents: 2_000_000 + from,
+      date: '2026-10-31',
+      req: { documentType: 'salary_slip', fileHash: 'payroll-hash', filename: 'october.pdf', pages: { from, to: from + 1 }, chequeNumber: '', date: '', amountWordsRaw: '', wordsCents: null },
+      ...overrides,
+    });
+
+  it('loads every cheque of the payroll together, with the numbers and date given', () => {
+    const cheques = [slipCheque('Jane Sample', '000700', 1), slipCheque('John Example', '000701', 3)];
+    const store = addPayroll(makeStore([co]), ctxFor(supervisor), cheques);
+    expect(store.cheques.map((c) => [c.payee, c.chequeNumber, c.date])).toEqual([
+      ['Jane Sample', '000700', '2026-10-31'],
+      ['John Example', '000701', '2026-10-31'],
+    ]);
+    expect(createIssueChecker(store, fakeMeasure)(store.cheques[0])).toEqual([]); // signed slips go straight to the queue
+    expect(store.audit.at(-1)).toMatchObject({ action: 'Loaded payroll', userName: supervisor.displayName });
+    expect(store.audit.at(-1)!.details).toContain('2 cheques, 000700 to 000701, dated 31/10/2026');
+    expect([...loadedSlips(store, 'payroll-hash').keys()]).toEqual([1, 3]);
+  });
+
+  it('needs someone allowed to edit cheque details, because the numbers are typed in', () => {
+    expect(() => addPayroll(makeStore([co]), ctxFor(operator), [slipCheque('Jane Sample', '000700', 1)])).toThrow(StoreError);
+  });
+
+  it('refuses the whole payroll if any cheque is wrong, loading none of it', () => {
+    const store = makeStore([co]);
+    const good = slipCheque('Jane Sample', '000700', 1);
+    const load = (...cheques: ReturnType<typeof slipCheque>[]) => () => addPayroll(store, ctxFor(admin), cheques);
+    expect(load()).toThrow('Tick at least one salary slip.');
+    expect(load(good, slipCheque('John Example', '000700', 3))).toThrow('Also given to Jane Sample');
+    expect(load(good, slipCheque('John Example', '70x', 3))).toThrow('Enter the cheque number');
+    expect(load(good, slipCheque('John Example', '000701', 3, { date: '' }))).toThrow('Enter the date');
+    expect(load(good, slipCheque('John Example', '000701', 3, { amountCents: 0 }))).toThrow('shows nothing to pay');
+    expect(load(good, slipCheque('John Example', '000701', 3, { companyId: 'another' }))).toThrow('Choose the company');
+    expect(store.cheques).toEqual([]);
+  });
+
+  it('never reuses a cheque number the company has already used', () => {
+    const printed = makeCheque(co, { chequeNumber: '000700', status: 'printed', payee: 'Old Supplier' });
+    const waiting = makeCheque(co, { chequeNumber: '000701', payee: 'Other Supplier' });
+    const store = makeStore([co], [printed, waiting]);
+    const entries = [
+      { payee: 'Jane Sample', amountCents: 100, chequeNumber: '700' },
+      { payee: 'John Example', amountCents: 100, chequeNumber: '000701' },
+      { payee: 'Mary Third', amountCents: 100, chequeNumber: '000702' },
+    ];
+    expect(payrollNumberProblems(store, co.id, entries)).toEqual(['Already used: Old Supplier, already printed.', 'Already used: Other Supplier, waiting to print.', '']);
+    expect(() => addPayroll(store, ctxFor(admin), [slipCheque('Jane Sample', '000700', 1)])).toThrow('Already used');
+    // Another company's cheque book has its own numbers.
+    expect(payrollNumberProblems(store, 'another-company', entries)).toEqual(['', '', '']);
+  });
+
+  it('does not load the same salary slip twice, but lets the rest of the payroll in later', () => {
+    const first = addPayroll(makeStore([co]), ctxFor(admin), [slipCheque('Jane Sample', '000700', 1)]);
+    expect(() => addPayroll(first, ctxFor(admin), [slipCheque('Jane Sample', '000705', 1)])).toThrow('already loaded');
+    const second = addPayroll(first, ctxFor(admin), [slipCheque('John Example', '000701', 3)]);
+    expect(second.cheques).toHaveLength(2);
+    // A slip that was discarded can be loaded again.
+    const discarded = cancelCheque(second, ctxFor(admin), second.cheques[0].id, 'wrong number');
+    expect([...loadedSlips(discarded, 'payroll-hash').keys()]).toEqual([3]);
+  });
+
+  it('a signed copy of the payroll takes the place of slips held unsigned', () => {
+    const unsigned = slipCheque('Jane Sample', '000700', 1, { req: { documentType: 'salary_slip', fileHash: 'first-export', pages: { from: 1, to: 2 }, amountWordsRaw: '', wordsCents: null, signature: { status: 'not_signed' } } });
+    const held = addPayroll(makeStore([co]), ctxFor(admin), [unsigned]);
+    const signed = { ...slipCheque('Jane Sample', '000700', 1), amountCents: unsigned.amountCents };
+    const after = addPayroll(held, ctxFor(admin), [signed]);
+    expect(after.cheques.map((c) => c.status)).toEqual(['cancelled', 'pending']);
+  });
+
+  it('offers the next number after the highest the company has used', () => {
+    const store = makeStore([co], [makeCheque(co, { chequeNumber: '000671', status: 'printed' }), makeCheque(co, { chequeNumber: '000099' }), makeCheque(co, { chequeNumber: '000900', status: 'cancelled' })]);
+    expect(nextChequeNumber(store, co.id)).toBe('000672');
+    expect(nextChequeNumber(store, 'no-such-company')).toBe('');
   });
 });
 

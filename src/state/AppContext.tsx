@@ -8,7 +8,7 @@ import { api } from '../platform/api';
 import type { AppInfo } from '../platform/api-types';
 import { measureText } from '../platform/measure';
 import { openPdf } from '../platform/pdf';
-import { importPdfFile, signatureResult, type ImportOutcome } from './importer';
+import { importPdfFile, signatureResult, type ImportOutcome, type PayrollAnswer, type PayrollRequest } from './importer';
 
 export type Tab = 'import' | 'held' | 'queue' | 'register' | 'setup';
 
@@ -54,6 +54,10 @@ interface AppContextValue {
   imports: ImportRow[];
   importFiles: (files: File[]) => void;
   clearImports: () => void;
+  /** A payroll PDF that is waiting for its cheque numbers, if one was just dropped. */
+  payrollRequest: PayrollRequest | null;
+  /** Answers it: the cheques to make, or null to load nothing. */
+  answerPayroll: (answer: PayrollAnswer | null) => void;
 
   toasts: Toast[];
   notify: (kind: Toast['kind'], text: string) => void;
@@ -206,13 +210,30 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [run]
   );
 
+  // ---- A payroll waiting for its cheque numbers ----------------------------------------
+  const [payrollRequest, setPayrollRequest] = useState<PayrollRequest | null>(null);
+  const payrollResolve = useRef<((answer: PayrollAnswer | null) => void) | null>(null);
+  const answerPayroll = useCallback((answer: PayrollAnswer | null) => {
+    const resolve = payrollResolve.current;
+    payrollResolve.current = null;
+    setPayrollRequest(null);
+    resolve?.(answer);
+  }, []);
+  const askPayroll = useCallback((request: PayrollRequest) => {
+    return new Promise<PayrollAnswer | null>((resolve) => {
+      payrollResolve.current = resolve;
+      setPayrollRequest(request);
+    });
+  }, []);
+
   const signOut = useCallback(() => {
+    answerPayroll(null); // a half-entered payroll is not left for the next person
     userRef.current = null;
     setUser(null);
     setImports([]);
     setToasts([]); // messages meant for one person are not left for the next
     setTab('import');
-  }, []);
+  }, [answerPayroll]);
 
   // Sign out automatically when the app is left alone.
   const lockMinutes = store.settings.autoLockMinutes;
@@ -258,7 +279,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
             if (!bytes) return; // archive copy missing: stays "not checked"
             const pdf = await openPdf(bytes);
             try {
-              const result = await signatureResult(pdf, zone);
+              const result = await signatureResult(pdf, zone, req.pages);
               const current = storeRef.current.companies.find((c) => c.id === companyId)?.signatureZones[req.documentType];
               if (JSON.stringify(current) === zoneKey) {
                 commit(setSignatureResult(storeRef.current, cheque.id, req.id, result));
@@ -293,7 +314,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           setImports((rows) => [{ id, filename: file.name, state: 'working', message: 'Reading…' }, ...rows]);
           let outcome: ImportOutcome;
           try {
-            outcome = await importPdfFile(file, { user: current, getStore: () => storeRef.current, run });
+            outcome = await importPdfFile(file, { user: current, getStore: () => storeRef.current, run, askPayroll });
           } catch (err) {
             console.error('Import failed', err);
             outcome = { state: 'error', message: 'Something went wrong reading this file.' };
@@ -302,7 +323,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         }
       });
     },
-    [notify, run]
+    [notify, run, askPayroll]
   );
 
   const clearImports = useCallback(() => setImports((rows) => rows.filter((r) => r.state === 'working')), []);
@@ -350,6 +371,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     imports,
     importFiles,
     clearImports,
+    payrollRequest,
+    answerPayroll,
     toasts,
     notify,
     dismissToast,

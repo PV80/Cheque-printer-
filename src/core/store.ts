@@ -518,6 +518,97 @@ export function addCheque(store: Store, ctx: Ctx, cheque: Cheque): AddResult {
   return { store: next, replaced: unsignedTwin ?? null };
 }
 
+/** Salary slips of this PDF that are already loaded, by the page each starts on. */
+export function loadedSlips(store: Store, fileHash: string): Map<number, Cheque> {
+  const slips = new Map<number, Cheque>();
+  for (const cheque of store.cheques) {
+    if (cheque.status === 'cancelled') continue;
+    for (const r of cheque.requisitions) {
+      if (r.fileHash === fileHash && r.pages) slips.set(r.pages.from, cheque);
+    }
+  }
+  return slips;
+}
+
+export interface PayrollEntry {
+  payee: string;
+  amountCents: number;
+  chequeNumber: string;
+}
+
+/**
+ * What is wrong with the cheque number proposed for each employee of a
+ * payroll, in the same order ('' = nothing). Checked while the numbers are
+ * being typed, and again when the payroll is loaded.
+ */
+export function payrollNumberProblems(store: Store, companyId: string, entries: PayrollEntry[]): string[] {
+  const firstUse = new Map<string, PayrollEntry>();
+  return entries.map((entry) => {
+    const number = entry.chequeNumber.trim();
+    const key = normaliseChequeNumber(number);
+    if (!/^\d{1,12}$/.test(number) || key === '') return 'Enter the cheque number (digits only).';
+
+    const twin = firstUse.get(key);
+    if (twin) return `Also given to ${twin.payee}.`;
+    firstUse.set(key, entry);
+
+    const clash = store.cheques.find(
+      (c) => c.status !== 'cancelled' && c.companyId === companyId && normaliseChequeNumber(c.chequeNumber) === key
+    );
+    if (!clash) return '';
+    // The same payment waiting unsigned is the one case left to the usual rules:
+    // a signed copy takes its place.
+    const samePayment =
+      clash.status === 'pending' && normalisePayee(clash.payee) === normalisePayee(entry.payee) && clash.amountCents === entry.amountCents;
+    if (samePayment) return '';
+    const state = clash.status === 'printed' ? 'already printed' : clash.status === 'spoiled' ? 'marked spoiled' : 'waiting to print';
+    return `Already used: ${clash.payee || 'no payee'}, ${state}.`;
+  });
+}
+
+/**
+ * Loads the cheques of a payroll together. Their numbers and date do not come
+ * from the PDF, so this needs the right to edit cheque details as well.
+ */
+export function addPayroll(store: Store, ctx: Ctx, cheques: Cheque[]): Store {
+  requirePermission(ctx, 'import');
+  requirePermission(ctx, 'edit_cheque');
+  if (cheques.length === 0) throw new StoreError('Tick at least one salary slip.');
+
+  const companyId = cheques[0].companyId;
+  const company = store.companies.find((c) => c.id === companyId);
+  if (!companyId || !company || cheques.some((c) => c.companyId !== companyId)) {
+    throw new StoreError('Choose the company whose cheque book is being used.');
+  }
+  for (const cheque of cheques) {
+    const who = cheque.payee.trim() || 'one employee';
+    if (!cheque.payee.trim()) throw new StoreError('One salary slip has no employee name.');
+    if (!Number.isSafeInteger(cheque.amountCents) || cheque.amountCents <= 0) throw new StoreError(`The salary slip for ${who} shows nothing to pay.`);
+    if (!isValidIsoDate(cheque.date)) throw new StoreError('Enter the date to print on the cheques.');
+    const slip = cheque.requisitions[0];
+    if (slip?.pages && loadedSlips(store, slip.fileHash).has(slip.pages.from)) {
+      throw new StoreError(`The salary slip for ${who} is already loaded.`);
+    }
+  }
+  const problems = payrollNumberProblems(store, companyId, cheques);
+  const bad = problems.findIndex((p) => p !== '');
+  if (bad >= 0) throw new StoreError(`${cheques[bad].payee}, cheque ${cheques[bad].chequeNumber || '(no number)'}: ${problems[bad]}`);
+
+  let next = store;
+  for (const cheque of cheques) next = addCheque(next, ctx, cheque).store;
+
+  const numbers = cheques.map((c) => c.chequeNumber).sort(compareNumbers);
+  const total = cheques.reduce((sum, c) => sum + c.amountCents, 0);
+  return withLog(
+    next,
+    ctx,
+    'Loaded payroll',
+    `${cheques[0].requisitions[0]?.filename ?? ''} — ${company.name}: ${cheques.length} cheques, ${numbers[0]} to ${numbers[numbers.length - 1]}, dated ${formatDate(cheques[0].date)}, total ${formatMoney(total)}`
+  );
+}
+
+const compareNumbers = (a: string, b: string) => Number(a) - Number(b) || a.localeCompare(b);
+
 export function setSignatureResult(store: Store, chequeId: string, requisitionId: string, result: SignatureResult): Store {
   const cheque = store.cheques.find((c) => c.id === chequeId);
   if (!cheque || cheque.status !== 'pending') return store;

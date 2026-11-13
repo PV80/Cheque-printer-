@@ -272,6 +272,73 @@ export async function makeReceiptPdf(o) {
   return doc.save();
 }
 
+// ---- A payroll: one PDF with a salary slip for each employee ------------------------
+
+const SLIP_SIGN_AREA = { x: 195, y: 430, w: 125, h: 36 };
+
+/** Where the director signs on page two of a salary slip, as page fractions from the top-left. */
+export const PAYROLL_SIGNATURE_BOX = {
+  x: SLIP_SIGN_AREA.x / LETTER.w,
+  y: (LETTER.h - SLIP_SIGN_AREA.y - SLIP_SIGN_AREA.h) / LETTER.h,
+  w: SLIP_SIGN_AREA.w / LETTER.w,
+  h: SLIP_SIGN_AREA.h / LETTER.h,
+};
+
+/**
+ * @param {object} o
+ * @param {string} o.company   the name at the top of every slip
+ * @param {string} o.period    e.g. "June 2026"
+ * @param {{ name: string, net: string, signed?: boolean, longSlip?: boolean }[]} o.staff
+ *        longSlip: the slip runs to a third page, which carries the director's line
+ */
+export async function makePayrollPdf(o) {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const bold = await doc.embedFont(StandardFonts.HelveticaBold);
+  const png = await doc.embedPng(signaturePng());
+
+  for (const person of o.staff) {
+    const total = person.longSlip ? 3 : 2;
+    const pages = Array.from({ length: total }, () => doc.addPage([LETTER.w, LETTER.h]));
+    const text = (page, str, x, y, size = 9, f = font, color = rgb(0, 0, 0)) => page.drawText(str, { x, y, size, font: f, color });
+    pages.forEach((page, i) => {
+      text(page, o.company, 380, 740);
+      text(page, 'Office 13, Sample Plaza,', 380, 727);
+      text(page, 'Nairobi Kenya', 380, 714);
+      text(page, '+254 700 000000 info@example.com', 40, 60, 8);
+      text(page, `Page ${i + 1} / ${total}`, 520, 60, 8);
+    });
+
+    const [one, two] = pages;
+    text(one, `Salary Slip - ${person.name} - ${o.period}`, 40, 620, 15, bold);
+    text(one, 'Employee', 40, 590, 9, bold);
+    text(one, 'Pay Period', 400, 590, 9, bold);
+    text(one, person.name, 40, 570);
+    text(one, '06/01/2026 - 06/30/2026', 400, 570);
+    text(one, 'Basic Salary (Monthly)', 40, 520, 9, bold);
+    text(one, 'KSh 99,999.00', 200, 520);
+
+    text(two, 'NAME', 40, 640, 9, bold);
+    text(two, 'AMOUNT', 530, 640, 9, bold);
+    text(two, 'Total Deductions', 40, 610);
+    text(two, 'KSh 12,345.67', 505, 610);
+    text(two, 'Net Salary', 40, 580, 9, bold);
+    text(two, `KSh ${person.net}`, 505, 580, 9, bold);
+    text(two, `To pay on xxxxxxxxxxxx of ${person.name} : KSh ${person.net}`, 40, 500);
+    text(two, 'Employee signature:__________________________________', 40, 470);
+
+    // The director's line: under the employee's, or alone at the top of a third page.
+    const sheet = pages[total - 1];
+    const y = person.longSlip ? 640 : 442;
+    text(sheet, "Director's signature: _________________________________", 40, y);
+    text(sheet, 'Sample Director', 125, y + 3, 9, font, rgb(0.1, 0.3, 0.8)); // typed beside the signature
+    if (person.signed) sheet.drawImage(png, { x: 205, y: y - 8, width: 105, height: 31 });
+  }
+
+  stamp(doc);
+  return doc.save();
+}
+
 /** A PDF with no text at all, like a scan. */
 export async function makeImageOnlyPdf() {
   const doc = await PDFDocument.create();

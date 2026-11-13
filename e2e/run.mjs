@@ -11,7 +11,7 @@ import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { _electron as electron } from 'playwright-core';
-import { makeImageOnlyPdf, makeReceiptPdf, makeRequisitionPdf, NOTE_SIGNATURE_BOX, RECEIPT_SIGNATURE_BOX, SIGNATURE_BOX } from './fixtures.mjs';
+import { makeImageOnlyPdf, makePayrollPdf, makeReceiptPdf, makeRequisitionPdf, NOTE_SIGNATURE_BOX, PAYROLL_SIGNATURE_BOX, RECEIPT_SIGNATURE_BOX, SIGNATURE_BOX } from './fixtures.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '..');
@@ -200,6 +200,22 @@ async function main() {
   writeFileSync(f.receiptPage2Unsigned, await makeReceiptPdf({ bank: 'I&M Bank', payee: 'LONG UNSIGNED PAYEE', date: '06/05/2026', amount: '8,800.00', chq: '118', signed: false, approvalOnPage2: true }));
   // A voucher signed only on its second page, the requisition note.
   f.noteSigned = await fixture('gi-150-signed-on-note.pdf', { company: GI, payee: 'Note Signer Ltd', chq: '000150', amount: '4,000/=', words: 'Four Thousand Only', note: 'signed' });
+  // A payroll: four salary slips in one PDF. The second runs to three pages, the third is
+  // not signed by the director, the fourth has nothing to pay.
+  f.payroll = join(dirs.pdfs, 'payroll-june.pdf');
+  writeFileSync(
+    f.payroll,
+    await makePayrollPdf({
+      company: GI,
+      period: 'June 2026',
+      staff: [
+        { name: 'TESTER ONE', net: '82,045.15', signed: true },
+        { name: 'TESTER TWO', net: '41,000.50', signed: true, longSlip: true },
+        { name: 'TESTER THREE', net: '19,757.74', signed: false },
+        { name: 'TESTER FOUR', net: '0.00', signed: true },
+      ],
+    })
+  );
   writeFileSync(f.notPdf, 'this is not a pdf');
   writeFileSync(f.scan, await makeImageOnlyPdf());
 
@@ -598,6 +614,66 @@ async function main() {
   await page.locator(`section[data-company="${GI}"] [data-testid=print-company]`).click();
   check((await page.locator('[data-testid=load-upside-down]').innerText()).includes('bottom edge going into the printer first'), 'the loading prompt tells the operator to load the leaves bottom edge first');
   await page.getByRole('button', { name: 'Cancel' }).click();
+
+  step('A payroll: one PDF, a cheque for each employee');
+  // An operator cannot give cheques their numbers, so cannot load a payroll.
+  await signOut(page);
+  await signIn(page, 'mary');
+  const refused = await load(page, [f.payroll]);
+  check(refused[0].state === 'error' && refused[0].text.includes('supervisor or administrator must load it'), 'an operator is told a supervisor must load a payroll');
+  await signOut(page);
+  await signIn(page, 'brian');
+
+  await tab(page, 'import');
+  await page.setInputFiles('[data-testid=file-input]', [f.payroll]);
+  await page.locator('[data-testid=payroll]').waitFor();
+  const payrollRows = page.locator('[data-testid=payroll-row]');
+  const payrollNumbers = () => page.locator('[data-testid=payroll-number]').evaluateAll((els) => els.map((e) => e.value));
+  checkEqual(await payrollRows.evaluateAll((rows) => rows.map((r) => r.dataset.payee)), ['TESTER ONE', 'TESTER TWO', 'TESTER THREE', 'TESTER FOUR'], 'every salary slip in the PDF is listed, in order');
+  checkEqual(await page.locator('[data-testid=payroll-company]').evaluate((s) => s.selectedOptions[0].text), GI, 'the company named on the slips is already chosen');
+  checkEqual(await payrollRows.evaluateAll((rows) => rows.map((r) => r.children[2].innerText)), ['82,045.15', '41,000.50', '19,757.74', '0.00'], 'net pay is read from each slip');
+  const ticks = page.locator('[data-testid=payroll-tick]');
+  check(!(await ticks.nth(3).isChecked()) && (await ticks.nth(3).isDisabled()), 'a slip with nothing to pay cannot be made into a cheque');
+  check(/^\d+$/.test(await page.locator('[data-testid=payroll-first]').inputValue()), 'the next number after the last cheque in the register is offered');
+
+  await page.fill('[data-testid=payroll-first]', '000900');
+  checkEqual(await payrollNumbers(), ['000900', '000901', '000902', ''], 'cheque numbers follow on from the first, keeping their zeros');
+  await ticks.nth(1).uncheck();
+  checkEqual(await payrollNumbers(), ['000900', '', '000901', ''], 'unticking an employee closes the gap');
+  await ticks.nth(1).check();
+  await page.locator('[data-testid=payroll-number]').nth(1).fill('000950');
+  checkEqual(await payrollNumbers(), ['000900', '000950', '000951', ''], 'changing one number carries on down the list from it');
+  await page.locator('[data-testid=payroll-number]').nth(0).fill('000123');
+  check((await payrollRows.nth(0).innerText()).includes('Already used'), 'a number already printed for this company is refused');
+  check(await page.locator('[data-testid=payroll-load]').isDisabled(), 'and the payroll cannot be loaded until it is corrected');
+  await page.fill('[data-testid=payroll-first]', '000900');
+  await page.fill('[data-testid=payroll-date]', '2026-06-30');
+  check((await page.locator('[data-testid=payroll-total]').innerText()).includes('3 cheques, total KES 142,803.39'), 'the total to be paid is shown');
+  await shot(page, '08-payroll');
+  await page.click('[data-testid=payroll-load]');
+  await page.waitForFunction(() => [...document.querySelectorAll('[data-testid=import-results] li')].every((li) => li.dataset.state !== 'working'));
+  const payrollResult = (await page.locator('[data-testid=import-results] li').first().innerText()).replace(/\s+/g, ' ');
+  check(payrollResult.includes('payroll June 2026: 3 cheques (000900 to 000902)'), 'one cheque is made for each ticked employee');
+
+  await tab(page, 'held');
+  checkEqual(await heldIssues(page, '000900'), ['signature_zone_missing'], 'the cheques wait until the salary slip has a signature box');
+  await page.locator('[data-testid=held-list] > li[data-cheque="000900"] [data-testid=zone-open]').click();
+  await page.locator('[data-testid=zone-page][data-page="2"]').waitFor();
+  check((await page.locator('[data-testid=zone-form]').innerText()).includes('Salary slip'), 'the signature-box screen recognises a salary slip');
+  await drawSignatureBox(page, PAYROLL_SIGNATURE_BOX, 2);
+  checkEqual(await verdict(page), true, 'a box drawn round the director\'s signature on the first slip finds it');
+  await page.click('[data-testid=zone-save]');
+  await page.locator('[data-testid=held-list] > li[data-cheque="000901"]').waitFor({ state: 'detached' });
+  await page.locator('[data-testid=held-list] > li[data-cheque="000902"] [data-issue="unsigned"]').waitFor();
+  checkEqual(await heldIssues(page, '000902'), ['unsigned'], 'the one slip the director did not sign is held; the box is set once for all slips');
+  await tab(page, 'queue');
+  const payQueue = await queueNumbers(page, GI);
+  check(payQueue.includes('000900') && payQueue.includes('000901'), 'signed slips are in the print queue, including the one signed on its third page');
+  const payRow = (await page.locator(`section[data-company="${GI}"] tbody tr[data-cheque="000901"]`).innerText()).replace(/\s+/g, ' ');
+  check(payRow.includes('TESTER TWO') && payRow.includes('41,000.50') && payRow.includes('30/06/2026'), `each cheque has its own payee and net pay, and the date given (${payRow})`);
+
+  const again = await load(page, [f.payroll]);
+  check(again[0].state === 'skipped' && again[0].text.includes('Already loaded'), 'the same payroll cannot be loaded twice');
 
   step('Send the register to another computer');
   await tab(page, 'register');

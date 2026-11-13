@@ -4,6 +4,7 @@ import { Header } from './components/Header';
 import { HeldTab } from './components/HeldTab';
 import { ImportTab } from './components/ImportTab';
 import { LoginScreen } from './components/LoginScreen';
+import { PayrollModal } from './components/PayrollModal';
 import { QueueTab } from './components/QueueTab';
 import { RegisterTab } from './components/RegisterTab';
 import { SetupTab } from './components/SetupTab';
@@ -18,7 +19,7 @@ const TOAST_STYLE = {
 };
 
 function Shell() {
-  const { boot, user, tab, setTab, importFiles, toasts, dismissToast, saveError, recovered, dismissRecovered } = useApp();
+  const { boot, user, tab, setTab, importFiles, toasts, dismissToast, saveError, recovered, dismissRecovered, payrollRequest } = useApp();
   const [dragging, setDragging] = useState(false);
 
   // A PDF can be dropped anywhere in the window, on any tab.
@@ -110,6 +111,7 @@ function Shell() {
             {tab === 'register' && <RegisterTab />}
             {tab === 'setup' && <SetupTab />}
           </main>
+          {payrollRequest && <PayrollModal key={payrollRequest.filename} request={payrollRequest} />}
         </>
       ) : (
         <LoginScreen />

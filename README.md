@@ -83,6 +83,7 @@ not remove the data either.
 | Load requisitions, print signed cheques, record results | ✓ | ✓ | ✓ |
 | Combine / discard requisitions | ✓ | ✓ | ✓ |
 | Edit cheque details, choose the company | | ✓ | ✓ |
+| Load a payroll (gives each cheque its number and date) | | ✓ | ✓ |
 | Override an unsigned requisition or possible double payment (reason logged) | | ✓ | ✓ |
 | Mark a printed cheque spoiled later | | ✓ | ✓ |
 | Companies, layouts, signature boxes, people, backups, undo "printed" | | | ✓ |
@@ -99,6 +100,28 @@ types their own username, password and a reason in the override window. Both nam
    load the leaves in the order shown, tick that the first leaf matches, print.
 4. Afterwards say what happened to each leaf: printed correctly, spoiled, or did not print.
 5. **Register** — everything loaded and what became of it; export to a spreadsheet (CSV).
+
+### Payroll: one PDF, a cheque for each employee
+
+Drop the payroll PDF from the accounts system (one "Salary Slip" per employee, all in one
+file). The app splits it into one cheque per slip: payee = the employee, amount = the net
+salary. Salary slips carry no cheque number and no cheque date, so a window asks for:
+
+- the **cheque book** (company) — already chosen if the slips name a company the app knows;
+- the **date** to print on the cheques;
+- the **first cheque number** — the next one after the last in the register is offered. The
+  rest follow in order down the list. Change any number and the ones below follow on from
+  it (for a leaf taken out of the stack).
+
+Untick anyone not paid by cheque. A slip with nothing to pay cannot be ticked. A number the
+company has already used is refused before anything is loaded.
+
+Each slip is checked for the director's signature in its own right, on its own pages. Set
+the signature box once, on any one slip (draw it round the director's signature only, not
+the employee's line): it is tied to the words "Director's signature" and found on every
+slip, whichever page that line falls on. Unsigned slips are held; the others go to the queue.
+
+Dropping the same payroll again offers only the slips not yet loaded.
 
 The print queue has **Clear** on each company and **Clear whole queue**. Cleared requisitions
 are kept in the register as discarded; drop the PDF in again to print one after all.
@@ -129,6 +152,9 @@ other.
 - The amount in words on the requisition must agree with the figures, or it is held.
 - Only the first page is read. Supporting pages (invoices, schedules) never supply a payee,
   amount or date. A PDF holding two requisitions is refused: save each as its own file.
+  The one exception is a payroll, where every salary slip becomes its own cheque.
+- On a salary slip the amount is the net salary, and it must agree with the "To pay" line
+  on the same slip, or the cheque is held for a supervisor to check.
 - Dates written with numbers only (10/11/2026) are accepted when they can mean one thing:
   one reading is impossible (10/13/2026), or one reading is within days of when the PDF was
   made and the other is weeks away. Otherwise the requisition is held for someone to enter

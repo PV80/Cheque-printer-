@@ -6,7 +6,7 @@ import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist';
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { buildLines, type TextItem } from '../core/parser';
 import { analyseSignatureZone, type InkAnalysis, type Rect } from '../core/signature';
-import type { SignatureZone } from '../core/types';
+import type { PageRange, SignatureZone } from '../core/types';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -141,12 +141,15 @@ export interface LocatedZone {
 
 // The printed words a signature box is tied to. Only wording that labels a
 // signature is used, never names, dates or amounts, which change every time.
-const ANCHOR_PHRASE = /\b(?:approved by|authori[sz]ed by|signed by|checked by|approved|authori[sz]ed|signature|signatory|sign)\b/;
+// "Director's signature" is told apart from a bare "signature", which may be the employee's line.
+const ANCHOR_PHRASE =
+  /\b(?:approved by|authori[sz]ed by|signed by|checked by|(?:director|manager|approver|employer)['’]?s? signature|approved|authori[sz]ed|signature|signatory|sign)\b/;
 const labelText = (s: string) => s.replace(/[_.\-–—=:]+/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
 
 interface PageLabel {
   text: string; // the labelling phrase, e.g. "approved by"
   x: number; // where its line of text starts, as fractions of the page
+  w: number; // how far that text runs, including the line to sign on if it is part of it
   y: number;
 }
 
@@ -156,7 +159,7 @@ async function pageLabels(pdf: PdfDocument, pageNumber: number): Promise<PageLab
   const labels: PageLabel[] = [];
   for (const t of await pageText(page, 1)) {
     const phrase = labelText(t.str).match(ANCHOR_PHRASE);
-    if (phrase) labels.push({ text: phrase[0], x: t.x / viewport.width, y: t.y / viewport.height });
+    if (phrase) labels.push({ text: phrase[0], x: t.x / viewport.width, y: t.y / viewport.height, w: t.width / viewport.width });
   }
   return labels;
 }
@@ -169,10 +172,12 @@ export async function chooseAnchor(pdf: PdfDocument, at: LocatedZone): Promise<S
   const NEAR = 0.25; // of the page width
   // "Approved by" names the approver's place for certain; "Authorized" nearly so; a bare
   // "Sign" nearby may be someone else's line. Lower rank wins, then the nearer label.
-  const rank = (label: PageLabel) => (label.text.endsWith(' by') ? 0 : /^(?:approved|authori[sz]ed)$/.test(label.text) ? 1 : 2);
+  const rank = (label: PageLabel) =>
+    label.text.endsWith(' by') || /^(?:director|manager|approver|employer)/.test(label.text) ? 0 : /^(?:approved|authori[sz]ed)$/.test(label.text) ? 1 : 2;
   let best: { label: PageLabel; distance: number } | null = null;
   for (const label of await pageLabels(pdf, at.page)) {
-    const dx = Math.max(at.x - label.x, 0, label.x - (at.x + at.w));
+    // A signature at the far end of "Signature: ____________" is still beside that label.
+    const dx = Math.max(at.x - (label.x + label.w), 0, label.x - (at.x + at.w));
     const dy = Math.max(at.y - label.y, 0, label.y - (at.y + at.h));
     const distance = Math.hypot(dx, dy);
     if (distance > NEAR) continue;
@@ -187,13 +192,18 @@ export async function chooseAnchor(pdf: PdfDocument, at: LocatedZone): Promise<S
  * is placed beside that label wherever it is — lower down, or on another
  * page. Otherwise it stays where it was drawn.
  */
-export async function locateZone(pdf: PdfDocument, zone: SignatureZone): Promise<LocatedZone> {
-  const fixed: LocatedZone = { page: zone.page, x: zone.x, y: zone.y, w: zone.w, h: zone.h };
+export async function locateZone(pdf: PdfDocument, zone: SignatureZone, within?: PageRange): Promise<LocatedZone> {
+  // Inside one salary slip of a payroll, "page 2" means the slip's second page,
+  // and the label is looked for on that slip's pages only.
+  const first = within ? Math.max(1, within.from) : 1;
+  const last = within ? Math.min(pdf.numPages, within.to) : pdf.numPages;
+  const home = within ? first + zone.page - 1 : zone.page;
+  const fixed: LocatedZone = { page: home, x: zone.x, y: zone.y, w: zone.w, h: zone.h };
   if (!zone.anchor) return fixed;
 
-  const order = [zone.page, ...Array.from({ length: pdf.numPages }, (_, i) => i + 1).filter((n) => n !== zone.page)];
+  const order = [home, ...Array.from({ length: last - first + 1 }, (_, i) => first + i).filter((n) => n !== home)];
   for (const page of order) {
-    if (page < 1 || page > pdf.numPages) continue;
+    if (page < first || page > last) continue;
     const hits = (await pageLabels(pdf, page)).filter((l) => l.text === zone.anchor!.text);
     if (hits.length === 0) continue;
     // If the wording appears twice on the page, take the one that puts the box closest to where it was drawn.
@@ -242,15 +252,17 @@ async function readBox(pdf: PdfDocument, zone: LocatedZone, ignoreTypedText: boo
 }
 
 /** Looks inside one signature box of a requisition for a signature-sized mark. */
-export async function checkSignature(pdf: PdfDocument, zone: SignatureZone): Promise<InkAnalysis> {
-  return readBox(pdf, await locateZone(pdf, zone), zone.ignoreTypedText);
+export async function checkSignature(pdf: PdfDocument, zone: SignatureZone, within?: PageRange): Promise<InkAnalysis> {
+  const at = await locateZone(pdf, zone, within);
+  if (within && (at.page < within.from || at.page > within.to)) return NOT_SIGNED;
+  return readBox(pdf, at, zone.ignoreTypedText);
 }
 
 /** A form may be signed in more than one place: a signature in any of its boxes counts. */
-export async function checkSignatureBoxes(pdf: PdfDocument, zones: SignatureZone[]): Promise<InkAnalysis> {
+export async function checkSignatureBoxes(pdf: PdfDocument, zones: SignatureZone[], within?: PageRange): Promise<InkAnalysis> {
   let best = NOT_SIGNED;
   for (const zone of zones) {
-    const result = await checkSignature(pdf, zone);
+    const result = await checkSignature(pdf, zone, within);
     if (result.signed) return result;
     if (result.inkMm2 > best.inkMm2) best = result;
   }

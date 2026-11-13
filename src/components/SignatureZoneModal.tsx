@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type MouseEvent } from 'react';
 import { CheckCircle, FileUp, Trash2, XCircle } from 'lucide-react';
 import { FORM_LABELS } from '../core/company';
-import { parseRequisition } from '../core/parser';
+import { formTypeOf } from '../core/payroll';
 import { SIGNATURE_MINIMUM, type InkAnalysis } from '../core/signature';
 import { saveCompany } from '../core/store';
 import type { DocumentType, SignatureZone } from '../core/types';
@@ -83,7 +83,7 @@ export function SignatureZoneModal({ companyId, fileHash, onClose }: Props) {
     if (!looksLikePdf(bytes)) return setError('That file is not a PDF.');
     try {
       const doc = await openPdf(bytes);
-      const type = parseRequisition(await extractPages(doc)).documentType;
+      const type = formTypeOf(await extractPages(doc));
       if (type !== formTypeRef.current) {
         // A different kind of form: start from the boxes saved for it, or the
         // ones another company already uses for the same form, as a suggestion.

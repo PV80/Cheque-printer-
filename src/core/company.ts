@@ -1,10 +1,11 @@
 import type { CompanyProfile, DocumentType } from './types';
 
-export const FORM_TYPES: DocumentType[] = ['requisition_voucher', 'payment_receipt', 'unknown'];
+export const FORM_TYPES: DocumentType[] = ['requisition_voucher', 'payment_receipt', 'salary_slip', 'unknown'];
 
 export const FORM_LABELS: Record<DocumentType, string> = {
   requisition_voucher: 'Cheque requisition voucher',
   payment_receipt: 'Payment receipt (from the accounts system)',
+  salary_slip: 'Salary slip (payroll)',
   unknown: 'Other form',
 };
 

@@ -72,6 +72,18 @@ export function usedChequeNumbers(store: Store, companyId: string): Set<string> 
   );
 }
 
+/** The number after the highest one this company has in the register ('' if it has none yet). */
+export function nextChequeNumber(store: Store, companyId: string): string {
+  let highest = '';
+  for (const c of store.cheques) {
+    if (c.companyId !== companyId || c.status === 'cancelled' || !/^\d{1,12}$/.test(c.chequeNumber)) continue;
+    if (highest === '' || Number(c.chequeNumber) > Number(highest)) highest = c.chequeNumber;
+  }
+  if (highest === '') return '';
+  const next = String(Number(highest) + 1);
+  return next.length > 12 ? '' : next.padStart(highest.length, '0');
+}
+
 /** `isReady` says whether a pending cheque has cleared every check. */
 export function buildQueue(store: Store, isReady: (cheque: Cheque) => boolean): QueueGroup[] {
   const groups: QueueGroup[] = [];
