@@ -2,7 +2,6 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, protocol, session, shell } f
 import { randomUUID } from 'node:crypto';
 import { existsSync, promises as fs } from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import type {
   AppInfo,
   LoadStoreResult,
@@ -235,9 +234,41 @@ function assertPrintJob(job: unknown): asserts job is PrintJob {
 
 const PRINT_PARTITION = 'cheque-print';
 
+// The page being printed is handed to the hidden window from memory. It is never
+// written to disk: a file in the temp folder can be locked by a virus scanner at
+// the moment it is opened (the load then fails with ERR_FAILED and nothing
+// prints), and it would leave payee names and amounts lying in a shared folder.
+const printPages = new Map<string, string>();
+
+function registerPrintProtocol(): void {
+  const printSession = session.fromPartition(PRINT_PARTITION);
+  printSession.protocol.handle('app', (request) => {
+    const url = new URL(request.url);
+    const html = url.host === 'print' ? printPages.get(url.pathname.slice(1)) : undefined;
+    if (html === undefined) return new Response('Not found', { status: 404 });
+    return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } });
+  });
+  // The hidden print window may only load its own page.
+  printSession.webRequest.onBeforeRequest((details, callback) => {
+    callback({ cancel: !details.url.startsWith('app://print/') });
+  });
+}
+
+/** Earlier versions wrote the page to the temp folder. Clear any a crash left behind. */
+async function removeOldPrintPages(): Promise<void> {
+  try {
+    const dir = app.getPath('temp');
+    for (const name of await fs.readdir(dir)) {
+      if (/^cheque-print-[0-9a-f-]{36}\.html$/i.test(name)) await fs.rm(path.join(dir, name), { force: true }).catch(() => undefined);
+    }
+  } catch {
+    // Nothing to clear, or the folder cannot be read: either way printing is unaffected.
+  }
+}
+
 async function withPrintWindow<T>(job: PrintJob, run: (win: BrowserWindow) => Promise<T>): Promise<T> {
-  const tmpFile = path.join(app.getPath('temp'), `cheque-print-${randomUUID()}.html`);
-  await fs.writeFile(tmpFile, job.html, 'utf8');
+  const id = randomUUID();
+  printPages.set(id, job.html);
 
   const win = new BrowserWindow({
     show: false,
@@ -251,11 +282,11 @@ async function withPrintWindow<T>(job: PrintJob, run: (win: BrowserWindow) => Pr
   });
 
   try {
-    await win.loadURL(pathToFileURL(tmpFile).toString());
+    await win.loadURL(`app://print/${id}`);
     return await run(win);
   } finally {
+    printPages.delete(id);
     if (!win.isDestroyed()) win.destroy();
-    await fs.rm(tmpFile, { force: true });
   }
 }
 
@@ -460,12 +491,6 @@ function lockDownNetwork(): void {
     callback({ cancel: !allowed });
   });
 
-  // The hidden print window may only load its own temporary page.
-  session.fromPartition(PRINT_PARTITION).webRequest.onBeforeRequest((details, callback) => {
-    const tempPrefix = pathToFileURL(path.join(app.getPath('temp'), 'cheque-print-')).toString();
-    callback({ cancel: !details.url.startsWith(tempPrefix) });
-  });
-
   session.defaultSession.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
 }
 
@@ -520,7 +545,9 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(() => {
     if (app.isPackaged) Menu.setApplicationMenu(null);
     registerAppProtocol();
+    registerPrintProtocol();
     lockDownNetwork();
+    void removeOldPrintPages();
     registerIpc();
     createWindow();
   });
