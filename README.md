@@ -103,6 +103,11 @@ types their own username, password and a reason in the override window. Both nam
 
 ### Payroll: one PDF, a cheque for each employee
 
+Two kinds of payroll PDF are handled. If it is a set of **cheque requisition vouchers**, one
+per employee, each already carrying its cheque number, just drop it: every voucher is loaded
+as its own requisition and nothing is asked. The rest of this section is about the other
+kind, **salary slips** straight from the accounts system, which carry no cheque numbers.
+
 Drop the payroll PDF from the accounts system (one "Salary Slip" per employee, all in one
 file). The app splits it into one cheque per slip: payee = the employee, amount = the net
 salary. Salary slips carry no cheque number and no cheque date, so a window asks for:
@@ -150,14 +155,18 @@ other.
 - A requisition reaches the queue only when its signature box contains a signature-sized mark,
   or a supervisor has overridden with a reason.
 - The amount in words on the requisition must agree with the figures, or it is held.
-- Only the first page is read. Supporting pages (invoices, schedules) never supply a payee,
-  amount or date. A PDF holding two requisitions is refused: save each as its own file.
-  The one exception is a payroll, where every salary slip becomes its own cheque.
+- Only the first page of a requisition is read. Supporting pages (invoices, payslips,
+  schedules) never supply a payee, amount or date.
+- One PDF may hold several requisitions (a month's salary vouchers, say). Each begins on a
+  page with the form's heading and its own payee, and is loaded exactly as if it had been
+  dropped as its own file: its own cheque number, its own amount check, its own signature.
+  The import line says how many went to the queue and how many are held.
 - On a salary slip the amount is the net salary, and it must agree with the "To pay" line
   on the same slip, or the cheque is held for a supervisor to check.
 - Dates written with numbers only (10/11/2026) are accepted when they can mean one thing:
   one reading is impossible (10/13/2026), or one reading is within days of when the PDF was
-  made and the other is weeks away. Otherwise the requisition is held for someone to enter
+  made and the other is weeks away, or another date on the same page shows which way round
+  that form writes its dates (30/11/2026 can only be day first). Otherwise the requisition is held for someone to enter
   the date. The accounts system has printed both month-first and day-first dates.
 - Anything the reader is unsure of — an amount in an unusual format, two different amounts or
   cheque numbers, a payee that may run on to a second line — holds the requisition until a

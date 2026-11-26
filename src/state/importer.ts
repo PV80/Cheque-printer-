@@ -3,8 +3,8 @@
 import { can } from '../core/auth';
 import { matchCompany } from '../core/company';
 import { formatTimestampDate } from '../core/dates';
-import { createIssueChecker } from '../core/issues';
-import { parseRequisition } from '../core/parser';
+import { createIssueChecker, type Issue } from '../core/issues';
+import { parseRequisition, requisitionStartPages, type ParsedRequisition } from '../core/parser';
 import { parsePayroll, type PayrollSlip } from '../core/payroll';
 import { addCheque, addPayroll, chequeFromRequisition, checkFileHash, describeCheque, loadedSlips, type Ctx } from '../core/store';
 import type { Cheque, PageRange, Requisition, SignatureResult, SignatureZone, Store, User } from '../core/types';
@@ -67,7 +67,7 @@ export async function importPdfFile(file: File, deps: ImportDeps): Promise<Impor
 
   const fileHash = await sha256Hex(bytes);
   const seen = checkFileHash(deps.getStore(), fileHash);
-  // A payroll is looked at again: some of its salary slips may not be loaded yet.
+  // A PDF holding several requisitions is looked at again: some may not be loaded yet.
   if (seen.known && loadedSlips(deps.getStore(), fileHash).size === 0) {
     const n = seen.cheque.chequeNumber || '(no number)';
     if (seen.reason === 'already_loaded') return { state: 'skipped', message: `Already loaded (cheque ${n}).` };
@@ -100,60 +100,133 @@ export async function importPdfFile(file: File, deps: ImportDeps): Promise<Impor
     const slips = parsePayroll(pages);
     if (slips.length > 0) return await importPayroll({ file, bytes, fileHash, pdf, slips }, deps);
 
-    const { otherRequisitionPages, ...parsed } = parseRequisition(pages, { producedOn: await producedOn(pdf) });
-    if (otherRequisitionPages.length > 0) {
-      return {
-        state: 'error',
-        message: `This PDF holds more than one requisition (also on page ${otherRequisitionPages.join(', ')}). Save each one as its own PDF.`,
-      };
+    const produced = await producedOn(pdf);
+
+    // Several requisitions in one PDF, each complete with its own cheque number
+    // (a month's salary vouchers, say): each is loaded as if it were its own file.
+    const starts = requisitionStartPages(pages);
+    if (starts.length > 1 || (starts.length === 1 && starts[0] > 1)) {
+      return await importBatch({ file, bytes, fileHash, pdf, pages, starts, produced }, deps);
     }
 
-    const company = matchCompany(parsed.companyRaw, deps.getStore().companies);
-    const zone = company?.signatureZones[parsed.documentType];
-    let signature: SignatureResult = zone?.length ? await signatureResult(pdf, zone) : { status: 'unchecked' };
-
+    const parsed = readRequisition(pages, produced);
     await api.savePdf(fileHash, bytes);
-
-    // If the company or its signature box changed while this file was being read, check again later.
-    const companyNow = matchCompany(parsed.companyRaw, deps.getStore().companies);
-    if (companyNow?.id !== company?.id || JSON.stringify(companyNow?.signatureZones[parsed.documentType]) !== JSON.stringify(zone)) {
-      signature = { status: 'unchecked' };
-    }
-
-    const now = new Date().toISOString();
-    const requisition: Requisition = {
-      id: crypto.randomUUID(),
-      filename: file.name,
-      fileHash,
-      importedAt: now,
-      importedById: deps.user.id,
-      importedByName: deps.user.displayName,
-      ...parsed,
-      signature,
-    };
-    const cheque = chequeFromRequisition(requisition, companyNow?.id ?? null, crypto.randomUUID(), now);
-
-    let replaced = false;
-    const ok = deps.run((store, ctx) => {
-      const result = addCheque(store, ctx, cheque);
-      replaced = result.replaced !== null;
-      return result.store;
-    });
-    if (!ok) return { state: 'error', message: 'Could not load this requisition.' };
-
-    const store = deps.getStore();
-    const added = store.cheques.find((c) => c.id === cheque.id);
-    const issues = added ? createIssueChecker(store, measureText)(added) : [];
-    const label = `${companyNow?.name ?? (parsed.companyRaw || 'Unknown company')} — cheque ${parsed.chequeNumber || '(no number)'}`;
-
-    if (issues.length > 0) return { state: 'held', message: `${label}. Held: ${issues[0].message}` };
+    const result = await loadRequisition({ file, fileHash, pdf, parsed }, deps);
+    if (!result) return { state: 'error', message: 'Could not load this requisition.' };
+    if (result.issues.length > 0) return { state: 'held', message: `${result.label}. Held: ${result.issues[0].message}` };
     return {
       state: 'queued',
-      message: replaced ? `${label}. Signed copy received — added to the print queue.` : `${label}. Signed — added to the print queue.`,
+      message: result.replaced ? `${result.label}. Signed copy received — added to the print queue.` : `${result.label}. Signed — added to the print queue.`,
     };
   } finally {
     void pdf.destroy();
   }
+}
+
+type ParsedOne = Omit<ParsedRequisition, 'otherRequisitionPages'>;
+
+function readRequisition(pages: string[][], produced: string | undefined): ParsedOne {
+  const { otherRequisitionPages, ...parsed } = parseRequisition(pages, { producedOn: produced });
+  void otherRequisitionPages;
+  return parsed;
+}
+
+/**
+ * Checks one requisition's signature and adds its cheque. `within` is the part
+ * of the PDF it occupies, when the PDF holds several. Null if it was refused.
+ */
+async function loadRequisition(
+  input: { file: File; fileHash: string; pdf: PdfDocument; parsed: ParsedOne; within?: PageRange },
+  deps: ImportDeps
+): Promise<{ label: string; issues: Issue[]; replaced: boolean } | null> {
+  const { file, fileHash, pdf, parsed, within } = input;
+  const company = matchCompany(parsed.companyRaw, deps.getStore().companies);
+  const zone = company?.signatureZones[parsed.documentType];
+  let signature: SignatureResult = zone?.length ? await signatureResult(pdf, zone, within) : { status: 'unchecked' };
+
+  // If the company or its signature box changed while this file was being read, check again later.
+  const companyNow = matchCompany(parsed.companyRaw, deps.getStore().companies);
+  if (companyNow?.id !== company?.id || JSON.stringify(companyNow?.signatureZones[parsed.documentType]) !== JSON.stringify(zone)) {
+    signature = { status: 'unchecked' };
+  }
+
+  const now = new Date().toISOString();
+  const requisition: Requisition = {
+    id: crypto.randomUUID(),
+    filename: file.name,
+    fileHash,
+    importedAt: now,
+    importedById: deps.user.id,
+    importedByName: deps.user.displayName,
+    ...parsed,
+    signature,
+    ...(within ? { pages: within } : {}),
+  };
+  const cheque = chequeFromRequisition(requisition, companyNow?.id ?? null, crypto.randomUUID(), now);
+
+  let replaced = false;
+  const ok = deps.run((store, ctx) => {
+    const result = addCheque(store, ctx, cheque);
+    replaced = result.replaced !== null;
+    return result.store;
+  });
+  if (!ok) return null;
+
+  const store = deps.getStore();
+  const added = store.cheques.find((c) => c.id === cheque.id);
+  return {
+    label: `${companyNow?.name ?? (parsed.companyRaw || 'Unknown company')} — cheque ${parsed.chequeNumber || '(no number)'}`,
+    issues: added ? createIssueChecker(store, measureText)(added) : [],
+    replaced,
+  };
+}
+
+/**
+ * One PDF holding several requisitions. Each begins on a page with the form's
+ * heading and runs to the page before the next; the pages after its first are
+ * its supporting papers and are not read. Every rule applies to each one
+ * exactly as if it had been dropped as its own file.
+ */
+async function importBatch(
+  input: { file: File; bytes: Uint8Array; fileHash: string; pdf: PdfDocument; pages: string[][]; starts: number[]; produced: string | undefined },
+  deps: ImportDeps
+): Promise<ImportOutcome> {
+  const { file, bytes, fileHash, pdf, pages, starts, produced } = input;
+  const ranges: PageRange[] = starts.map((from, k) => ({ from, to: k + 1 < starts.length ? starts[k + 1] - 1 : pages.length }));
+  const already = loadedSlips(deps.getStore(), fileHash);
+  const count = `${ranges.length} ${ranges.length === 1 ? 'requisition' : 'requisitions'}`;
+  if (ranges.every((range) => already.has(range.from))) {
+    return { state: 'skipped', message: `Already loaded: this PDF (${count}).` };
+  }
+
+  await api.savePdf(fileHash, bytes);
+
+  let queued = 0;
+  let refused = 0;
+  const numbers: string[] = [];
+  const held: string[] = [];
+  for (const within of ranges) {
+    if (already.has(within.from)) continue;
+    const parsed = readRequisition(pages.slice(within.from - 1, within.to), produced);
+    const result = await loadRequisition({ file, fileHash, pdf, parsed, within }, deps);
+    if (!result) {
+      refused++;
+      continue;
+    }
+    if (parsed.chequeNumber) numbers.push(parsed.chequeNumber);
+    if (result.issues.length > 0) held.push(`cheque ${parsed.chequeNumber || '(no number)'} — ${result.issues[0].message}`);
+    else queued++;
+  }
+
+  const span = numbers.length > 1 ? ` (cheques ${numbers[0]} to ${numbers[numbers.length - 1]})` : numbers.length === 1 ? ` (cheque ${numbers[0]})` : '';
+  const parts = [
+    queued > 0 ? `${queued} added to the print queue` : '',
+    held.length > 0 ? `${held.length} held` : '',
+    already.size > 0 ? `${ranges.filter((r) => already.has(r.from)).length} already loaded` : '',
+    refused > 0 ? `${refused} could not be loaded` : '',
+  ].filter(Boolean);
+  const message = `${count} in this PDF${span}: ${parts.join(', ')}.${held.length > 0 ? ` First held: ${held[0]}` : ''}`;
+  return { state: held.length > 0 ? 'held' : queued > 0 ? 'queued' : 'error', message };
 }
 
 /** One PDF holding a salary slip for each employee: one cheque is made per slip. */

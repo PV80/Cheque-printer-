@@ -86,6 +86,29 @@ export interface DateReading {
   note: string; // why not, in words a person can act on
 }
 
+/** Which way round a document writes its all-number dates. */
+export type DateOrder = 'day-first' | 'month-first';
+
+/**
+ * Looks at every all-number date in a page's text. If some can only be read
+ * one way round (30/11/2026) and none only the other way, that is the way the
+ * page writes its dates. Undefined when there is no such evidence, or it conflicts.
+ */
+export function dateOrderIn(text: string): DateOrder | undefined {
+  let dayFirst = 0;
+  let monthFirst = 0;
+  for (const m of text.matchAll(/(?<![\d/.\-])(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})(?![\d/.\-])/g)) {
+    const [a, b, year] = [+m[1], +m[2], +m[3]];
+    const asDayFirst = toIso(year, b, a);
+    const asMonthFirst = toIso(year, a, b);
+    if (asDayFirst && !asMonthFirst) dayFirst++;
+    if (asMonthFirst && !asDayFirst) monthFirst++;
+  }
+  if (dayFirst > 0 && monthFirst === 0) return 'day-first';
+  if (monthFirst > 0 && dayFirst === 0) return 'month-first';
+  return undefined;
+}
+
 const NEAR_DAYS = 10;
 const CLEAR_GAP_DAYS = 15;
 
@@ -94,9 +117,10 @@ const CLEAR_GAP_DAYS = 15;
  * (10/11/2026 = 10 November) and month-first (10/13/2026 = 13 October) dates,
  * so an all-number date is only accepted when it can be just one thing:
  * either one reading is impossible, or one reading falls within a few days of
- * when the document was produced and the other is clearly far off.
+ * when the document was produced and the other is clearly far off, or the
+ * rest of the page shows which way round it writes dates (`order`).
  */
-export function readDate(raw: string, producedOn: string | undefined): DateReading {
+export function readDate(raw: string, producedOn: string | undefined, order?: DateOrder): DateReading {
   const s = raw.trim().replace(/\s+/g, ' ');
   const numeric = s.match(/^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4}|\d{2})$/);
   if (!numeric) {
@@ -116,6 +140,8 @@ export function readDate(raw: string, producedOn: string | undefined): DateReadi
       return { iso: a < b ? dayFirst : monthFirst, note: '' };
     }
   }
+  // Failing that, the way the same page writes its other dates settles it.
+  if (order) return { iso: order === 'day-first' ? dayFirst : monthFirst, note: '' };
   return {
     iso: '',
     note: `The date ${raw} could be ${formatDateLong(dayFirst)} or ${formatDateLong(monthFirst)}. Enter the right one.`,

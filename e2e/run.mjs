@@ -11,7 +11,7 @@ import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { _electron as electron } from 'playwright-core';
-import { makeImageOnlyPdf, makePayrollPdf, makeReceiptPdf, makeRequisitionPdf, NOTE_SIGNATURE_BOX, PAYROLL_SIGNATURE_BOX, RECEIPT_SIGNATURE_BOX, SIGNATURE_BOX } from './fixtures.mjs';
+import { makeBatchPdf, makeImageOnlyPdf, makePayrollPdf, makeReceiptPdf, makeRequisitionPdf, NOTE_SIGNATURE_BOX, PAYROLL_SIGNATURE_BOX, RECEIPT_SIGNATURE_BOX, SIGNATURE_BOX } from './fixtures.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '..');
@@ -215,6 +215,15 @@ async function main() {
         { name: 'TESTER FOUR', net: '0.00', signed: true },
       ],
     })
+  );
+  // A month's vouchers in one PDF: two complete requisitions, each with a page of figures after it.
+  f.batch = join(dirs.pdfs, 'vouchers-160-161.pdf');
+  writeFileSync(
+    f.batch,
+    await makeBatchPdf([
+      await makeRequisitionPdf({ company: GI, payee: 'Batch First Ltd', chq: '000160', amount: '11,000/=', words: 'Eleven Thousand Only', signature: 'drawn' }),
+      await makeRequisitionPdf({ company: GI, payee: 'Batch Second Ltd', chq: '000161', amount: '22,000/=', words: 'Twenty Two Thousand Only' }),
+    ])
   );
   writeFileSync(f.notPdf, 'this is not a pdf');
   writeFileSync(f.scan, await makeImageOnlyPdf());
@@ -674,6 +683,20 @@ async function main() {
 
   const again = await load(page, [f.payroll]);
   check(again[0].state === 'skipped' && again[0].text.includes('Already loaded'), 'the same payroll cannot be loaded twice');
+
+  step('Several requisitions in one PDF');
+  const batch = await load(page, [f.batch]);
+  check(batch[0].text.includes('2 requisitions in this PDF (cheques 000160 to 000161): 1 added to the print queue, 1 held'), `each requisition in the PDF is loaded on its own (${batch[0].text.slice(-150)})`);
+  await tab(page, 'queue');
+  const firstOfBatch = (await page.locator(`section[data-company="${GI}"] tbody tr[data-cheque="000160"]`).innerText()).replace(/\s+/g, ' ');
+  check(firstOfBatch.includes('Batch First Ltd') && firstOfBatch.includes('11,000.00'), 'the signed one is queued with its own payee and amount');
+  check(!(await queueNumbers(page, GI)).includes('000161'), 'the unsigned one is not queued just because its neighbour was signed');
+  await tab(page, 'held');
+  checkEqual(await heldIssues(page, '000161'), ['unsigned'], 'it is held as unsigned: each signature is looked for on its own pages');
+  const secondOfBatch = (await page.locator('[data-testid=held-list] > li[data-cheque="000161"]').innerText()).replace(/\s+/g, ' ');
+  check(secondOfBatch.includes('Batch Second Ltd') && secondOfBatch.includes('22,000.00') && !secondOfBatch.includes('999,999'), 'nothing leaks in from the pages of figures between them');
+  const batchAgain = await load(page, [f.batch]);
+  check(batchAgain[0].state === 'skipped' && batchAgain[0].text.includes('Already loaded'), 'the same PDF is not loaded twice');
 
   step('Send the register to another computer');
   await tab(page, 'register');

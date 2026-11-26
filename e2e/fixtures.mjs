@@ -272,6 +272,29 @@ export async function makeReceiptPdf(o) {
   return doc.save();
 }
 
+// ---- Several requisitions in one PDF ------------------------------------------------
+
+/**
+ * Joins complete requisition PDFs into one file, each followed by a page of
+ * supporting figures, the way a month's salary vouchers arrive.
+ * @param {Uint8Array[]} parts
+ */
+export async function makeBatchPdf(parts) {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  for (const [index, bytes] of parts.entries()) {
+    const part = await PDFDocument.load(bytes);
+    for (const page of await doc.copyPages(part, part.getPageIndices())) doc.addPage(page);
+    const support = doc.addPage([PAGE.w, PAGE.h]);
+    const text = (str, y) => support.drawText(str, { x: 60, y, size: 10, font });
+    text('PAYSLIP FOR JUNE 2026', 760);
+    text('NET PAY   KES 999,999.99', 730); // must never reach a cheque
+    text(`Supporting figures for requisition ${index + 1}. Payment: 01/01/2020`, 700);
+  }
+  stamp(doc);
+  return doc.save();
+}
+
 // ---- A payroll: one PDF with a salary slip for each employee ------------------------
 
 const SLIP_SIGN_AREA = { x: 195, y: 430, w: 125, h: 36 };

@@ -7,7 +7,7 @@
 // empty or noted for a person to confirm — it never guesses.
 
 import { parseAmountToCents, wordsToCents } from './amount';
-import { findDateInText, readDate } from './dates';
+import { dateOrderIn, findDateInText, readDate } from './dates';
 import type { DocumentType } from './types';
 
 export interface TextItem {
@@ -296,12 +296,37 @@ function detectType(lines: string[]): DocumentType {
 }
 
 /**
+ * A form's underline is blank space to be written on, not text. On a form filled
+ * in by a program the value sits in the middle of it ("CHQ __4869______"), so
+ * the underline is taken out before anything is read.
+ */
+function withoutUnderlines(line: string): string {
+  return line.replace(/_{2,}|(?<![^\s])_(?![^\s])/g, ' ').replace(/ +$/, '');
+}
+
+/**
+ * The pages (1-based) on which a requisition begins. Each has the form's own
+ * heading and its own payee; a receipt that simply runs on to another page, or
+ * a supporting payslip or invoice, has neither.
+ */
+export function requisitionStartPages(pages: string[][]): number[] {
+  const starts: number[] = [];
+  pages.forEach((rawLines, index) => {
+    const pageLines = rawLines.map(withoutUnderlines);
+    const hasTitle = pageLines.some((l) => REQUISITION_TITLE.test(l));
+    const hasPayee = pageLines.some((l) => labelValues(l).some((v) => v.key === 'payee' && v.value));
+    if (hasTitle && hasPayee) starts.push(index + 1);
+  });
+  return starts;
+}
+
+/**
  * pages = the lines of each page, as produced by buildLines(). Only the first
  * page is read: later pages are supporting papers (invoices, schedules) whose
  * amounts and dates must never leak into the cheque.
  */
 export function parseRequisition(pages: string[][], options: ParseOptions = {}): ParsedRequisition {
-  const lines = pages[0] ?? [];
+  const lines = (pages[0] ?? []).map(withoutUnderlines);
   const documentType = detectType(lines);
   const reviewNotes: string[] = [];
 
@@ -367,7 +392,7 @@ export function parseRequisition(pages: string[][], options: ParseOptions = {}):
   const dateRaw = findDateInText(dateSource) ?? '';
   let date = '';
   if (dateRaw) {
-    const reading = readDate(dateRaw, options.producedOn);
+    const reading = readDate(dateRaw, options.producedOn, dateOrderIn(lines.join('\n')));
     date = reading.iso;
     if (reading.note) reviewNotes.push(reading.note);
   }
@@ -379,14 +404,7 @@ export function parseRequisition(pages: string[][], options: ParseOptions = {}):
   const bank = documentType === 'payment_receipt' ? bankAccount(lines) : '';
   const companyRaw = bank ? (header ? `${bank} (${header})` : bank) : header;
 
-  const otherRequisitionPages: number[] = [];
-  pages.forEach((pageLines, index) => {
-    // A second requisition has its own heading and its own payee. A receipt that
-    // simply runs on to another page has neither.
-    const hasTitle = pageLines.some((l) => REQUISITION_TITLE.test(l));
-    const hasPayee = pageLines.some((l) => labelValues(l).some((v) => v.key === 'payee' && v.value));
-    if (index > 0 && hasTitle && hasPayee) otherRequisitionPages.push(index + 1);
-  });
+  const otherRequisitionPages = requisitionStartPages(pages).filter((page) => page > 1);
 
   return {
     documentType,

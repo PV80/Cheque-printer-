@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { findNameConflict, matchCompany, normaliseCompanyName } from '../src/core/company';
-import { buildLines, parseRequisition, type TextItem } from '../src/core/parser';
+import { buildLines, parseRequisition, requisitionStartPages, type TextItem } from '../src/core/parser';
 import { makeCompany } from './helpers';
 
 // The day the sample documents were produced; settles day/month order in their dates.
@@ -196,6 +196,78 @@ describe('parseRequisition — the typed voucher as really used', () => {
     // A long receipt that runs on to a second page is still one requisition.
     const runOn = ['Payment Receipt: PBNK9/2026/00001', 'INVOICE NUMBER   REFERENCE   AMOUNT', 'APPROVED BY: ________'];
     expect(parseRequisition([REAL_VOUCHER, runOn]).otherRequisitionPages).toEqual([]);
+  });
+});
+
+// A voucher filled in by a program: each value sits in the middle of the form's underline.
+const filledVoucher = (payee: string, chq: string, amount: string, words: string, paymentDate = '27/11/2026') => [
+  'SAMPLE COMPANY LTD',
+  'CHEQUE REQUISITION VOUCHER',
+  `Date of Requisitioning ________${paymentDate}__________________`,
+  `Date of Payment __________________${paymentDate}   _____________`,
+  `PAYE: __________________${payee} ______________CHQ __${chq}__________ AMOUNT: ___________${amount} ___`,
+  `SHILLING:________________${words}____________________________________________________________`,
+  '____________________________________________________________________________________',
+  'Details November 2026 staff salary',
+  'Contract',
+  'Amount_______________   Already paid ________________   Balance___________',
+  `Salary   Net Salary   November 2026   ${amount}`,
+  `Total (KES)   ${amount}`,
+  'Prepared By   Authorized By:   Cheque collected By: __________________________',
+  'Accounts Department   Sample Director',
+  'Amount _______________ ID No.__________________',
+  `Date __${paymentDate}____________ Date _______________${paymentDate}`,
+  'Sign: ____________________ Date: ________________',
+  `REF${chq} | Salary period: 01/11/2026 - 30/11/2026`,
+];
+const payslipPage = (chq: string) => ['SAMPLE COMPANY LTD', 'PAYSLIP FOR NOVEMBER 2026', 'JANE SAMPLE', 'NET PAY   KES 82,045.15', `Cheque ${chq} | Payment: 27/11/2026`];
+
+describe('parseRequisition — a voucher filled in over its underlines', () => {
+  const voucher = filledVoucher('JANE SAMPLE', '4869', '82,045.15', 'Eighty-two thousand and forty-five shillings and fifteen cents only.');
+
+  it('reads each value from the middle of its underline', () => {
+    expect(parseRequisition([voucher, payslipPage('4869')])).toEqual({
+      documentType: 'requisition_voucher',
+      companyRaw: 'SAMPLE COMPANY LTD',
+      payee: 'JANE SAMPLE', // not run together with the cheque number and amount beside it
+      dateRaw: '27/11/2026',
+      date: '2026-11-27',
+      amountCents: 8_204_515,
+      amountWordsRaw: 'Eighty-two thousand and forty-five shillings and fifteen cents only',
+      wordsCents: 8_204_515,
+      chequeNumber: '4869',
+      reviewNotes: [],
+      otherRequisitionPages: [],
+    });
+  });
+
+  it('invents nothing for a form left empty', () => {
+    const blank = ['SAMPLE COMPANY LTD', 'CHEQUE REQUISITION VOUCHER', 'Date of Payment ______________', 'PAYE: ________________________CHQ ____________ AMOUNT: ______________', 'SHILLING:______________________'];
+    expect(parseRequisition([blank])).toMatchObject({ date: '', amountCents: 0, wordsCents: null, chequeNumber: '' });
+  });
+
+  it('takes the date order from the rest of the page when the date itself could be read two ways', () => {
+    const december = filledVoucher('JANE SAMPLE', '4869', '5,000.00', 'Five thousand shillings only.', '05/12/2026');
+    // "Salary period: 01/11/2026 - 30/11/2026" on the same page can only be day first.
+    expect(parseRequisition([december])).toMatchObject({ dateRaw: '05/12/2026', date: '2026-12-05', reviewNotes: [] });
+    // Without anything to go on, it is still left for a person.
+    const noEvidence = december.filter((line) => !line.includes('Salary period'));
+    expect(parseRequisition([noEvidence]).date).toBe('');
+  });
+});
+
+describe('several requisitions in one PDF', () => {
+  it('finds the page each requisition starts on; payslips and invoices between them are not requisitions', () => {
+    const a = filledVoucher('JANE SAMPLE', '4869', '82,045.15', 'Eighty-two thousand and forty-five shillings and fifteen cents only.');
+    const b = filledVoucher('JOHN EXAMPLE', '4870', '41,017.90', 'Forty-one thousand and seventeen shillings and ninety cents only.');
+    const pages = [a, payslipPage('4869'), b, payslipPage('4870'), ['Invoice 77', 'Amount: 9,999.00']];
+    expect(requisitionStartPages(pages)).toEqual([1, 3]);
+    expect(requisitionStartPages([['Cover sheet'], a])).toEqual([2]);
+    expect(requisitionStartPages([payslipPage('4869')])).toEqual([]);
+
+    // Each is read from its own first page only: nothing leaks from its neighbour or its payslip.
+    const second = parseRequisition(pages.slice(2, 5));
+    expect(second).toMatchObject({ payee: 'JOHN EXAMPLE', chequeNumber: '4870', amountCents: 4_101_790, wordsCents: 4_101_790, otherRequisitionPages: [] });
   });
 });
 

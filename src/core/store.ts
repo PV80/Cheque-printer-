@@ -518,7 +518,10 @@ export function addCheque(store: Store, ctx: Ctx, cheque: Cheque): AddResult {
   return { store: next, replaced: unsignedTwin ?? null };
 }
 
-/** Salary slips of this PDF that are already loaded, by the page each starts on. */
+/**
+ * When one PDF holds several requisitions (a batch of vouchers, or the salary
+ * slips of a payroll): those already loaded, by the page each starts on.
+ */
 export function loadedSlips(store: Store, fileHash: string): Map<number, Cheque> {
   const slips = new Map<number, Cheque>();
   for (const cheque of store.cheques) {

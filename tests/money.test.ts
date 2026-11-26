@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { amountToWords, formatFigures, formatMoney, parseAmountToCents, wordsToCents } from '../src/core/amount';
-import { dateWarning, findDateInText, formatDate, formatTimestamp, formatTimestampDate, isValidIsoDate, parseDate, readDate } from '../src/core/dates';
+import { dateOrderIn, dateWarning, findDateInText, formatDate, formatTimestamp, formatTimestampDate, isValidIsoDate, parseDate, readDate } from '../src/core/dates';
 
 describe('amountToWords', () => {
   it.each([
@@ -146,6 +146,20 @@ describe('dates', () => {
     expect(parseDate('2026/06/25')).toBe('2026-06-25');
     expect(findDateInText('BILL/2026/10/0020')).toBeNull();
     expect(findDateInText('1/2/20261')).toBeNull();
+  });
+
+  it('uses the way the rest of the page writes dates, when that is plain', () => {
+    expect(dateOrderIn('Salary period: 01/11/2026 - 30/11/2026')).toBe('day-first');
+    expect(dateOrderIn('Invoice date 11/30/2026, due 12/15/2026')).toBe('month-first');
+    expect(dateOrderIn('Paid 05/06/2026, due 07/08/2026')).toBeUndefined(); // every date could be either
+    expect(dateOrderIn('From 30/11/2026 to 12/15/2026')).toBeUndefined(); // the page contradicts itself
+    expect(dateOrderIn('Ref 4869/11/2026 and account 1.12.2026.7')).toBeUndefined(); // not dates
+
+    expect(readDate('05/12/2026', undefined, 'day-first')).toEqual({ iso: '2026-12-05', note: '' });
+    expect(readDate('05/12/2026', undefined, 'month-first')).toEqual({ iso: '2026-05-12', note: '' });
+    expect(readDate('05/12/2026', undefined).iso).toBe('');
+    // When the document was made still comes first.
+    expect(readDate('05/12/2026', '2026-05-12', 'day-first').iso).toBe('2026-05-12');
   });
 
   it('reads an all-number date only when it can mean one thing', () => {
